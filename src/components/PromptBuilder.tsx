@@ -194,6 +194,21 @@ export function PromptBuilder() {
         updateState({ segments: segments.map((s: any, i: number) => i === index && s.type === 'text' ? { ...s, content } : s) });
     };
 
+    const moveSegment = (index: number, direction: 'left' | 'right') => {
+        if (direction === 'left' && index === 0) return;
+        if (direction === 'right' && index === segments.length - 1) return;
+
+        const newSegments = [...segments];
+        const targetIndex = direction === 'left' ? index - 1 : index + 1;
+
+        // Swap
+        const temp = newSegments[index];
+        newSegments[index] = newSegments[targetIndex];
+        newSegments[targetIndex] = temp;
+
+        updateState({ segments: newSegments });
+    };
+
     const handleCancel = () => {
         setEditPromptId(null);
         updateState({
@@ -630,7 +645,7 @@ export function PromptBuilder() {
 
             {/* Main Area */}
             <div style={{ display: 'flex', flexDirection: 'column', gap: '1.5rem', overflowY: 'auto', paddingRight: '1rem' }}>
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                <div className="builder-header">
                     <h2>Construct Prompt</h2>
                     <div style={{ display: 'flex', gap: '0.5rem' }}>
                         <button
@@ -726,6 +741,12 @@ export function PromptBuilder() {
                                     boxShadow: '0 0 6px var(--primary)'
                                 }} />
                             )}
+
+                            {/* Move Buttons (Mobile/Hover) */}
+                            <div style={{ display: 'flex', gap: '2px', marginRight: '6px' }}>
+                                <button className="segment-move-btn" onClick={() => moveSegment(index, 'left')} title="Move Left">←</button>
+                                <button className="segment-move-btn" onClick={() => moveSegment(index, 'right')} title="Move Right">→</button>
+                            </div>
 
                             {/* The Segment Itself */}
                             {seg.type === 'block' ? (() => {
