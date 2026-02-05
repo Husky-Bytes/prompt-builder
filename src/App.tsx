@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { SpeedInsights } from '@vercel/speed-insights/react';
 import { BlockManager } from './components/BlockManager';
 import { PromptBuilder } from './components/PromptBuilder';
 import { PromptLibrary } from './components/PromptLibrary';
@@ -152,6 +153,7 @@ function App() {
         {activeTab === 'builder' && <PromptBuilder />}
         {activeTab === 'library' && <PromptLibrary onEdit={handleEdit} />}
       </div>
+      <SpeedInsights />
     </div>
   )
 }
