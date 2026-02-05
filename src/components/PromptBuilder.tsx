@@ -262,6 +262,37 @@ export function PromptBuilder() {
         }
     };
 
+    const handleClear = () => {
+        // If nothing to clear, do nothing
+        if (segments.length === 0 && !title && !notes) return;
+
+        let isDirty = false;
+
+        if (editPromptId) {
+            const original = prompts.find(p => p.id === editPromptId);
+            if (original) {
+                // Check if current state differs from original
+                const hasChanges =
+                    title !== original.title ||
+                    notes !== original.notes ||
+                    JSON.stringify(segments) !== JSON.stringify(original.segments);
+
+                if (hasChanges) isDirty = true;
+            }
+        } else {
+            // If new and has content
+            if (segments.length > 0 || title || notes) isDirty = true;
+        }
+
+        if (isDirty) {
+            if (window.confirm('Clear unsaved changes?')) {
+                handleCancel();
+            }
+        } else {
+            handleCancel();
+        }
+    };
+
     // DnD State
     const [dragOverIndex, setDragOverIndex] = useState<number | null>(null);
     const [isDragging, setIsDragging] = useState(false);
@@ -609,6 +640,18 @@ export function PromptBuilder() {
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                     <h2>Construct Prompt</h2>
                     <div style={{ display: 'flex', gap: '0.5rem' }}>
+                        <button
+                            onClick={handleClear}
+                            className="btn btn-secondary"
+                            title="Clear all"
+                            style={{
+                                color: 'var(--danger)',
+                                borderColor: 'var(--danger)',
+                                opacity: segments.length === 0 ? 0.5 : 1
+                            }}
+                        >
+                            Clear
+                        </button>
                         <button onClick={addTextSegment} className="btn btn-secondary">+ Text</button>
                         <button onClick={addNewlineSegment} className="btn btn-secondary" title="Force a new line">↵ Newline</button>
                     </div>
