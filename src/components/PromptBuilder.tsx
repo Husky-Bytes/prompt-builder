@@ -353,18 +353,11 @@ export function PromptBuilder() {
 
 
     return (
-        <div style={{ display: 'grid', gridTemplateColumns: '320px 1fr', gap: '2rem', minHeight: 'calc(100vh - 200px)' }}
+        <div className="builder-layout"
             onDragEnd={() => { setDragOverIndex(null); setIsDragging(false); setDragSourceIndex(null); }}
         >
             {/* Sidebar: Available Blocks */}
-            <div style={{
-                borderRight: '1px solid var(--border)',
-                paddingRight: '1.5rem',
-                overflowY: 'auto',
-                display: 'flex',
-                flexDirection: 'column',
-                gap: '1rem'
-            }}>
+            <div className="builder-sidebar">
                 <h2 className="text-lg">Available Blocks</h2>
 
                 {/* Search */}
