@@ -8,7 +8,16 @@ export interface Block {
 
 export type PromptSegment =
     | { type: 'block', blockId: string }
-    | { type: 'text', content: string };
+    | { type: 'text', content: string }
+    | { type: 'newline' };
+
+export interface BuilderState {
+    title: string;
+    segments: PromptSegment[];
+    rating: number;
+    notes: string;
+    folderId?: string;
+}
 
 export interface Folder {
     id: string;

@@ -60,7 +60,33 @@ body {
   margin: 0 auto;
   padding: 2rem;
   min-height: 100vh;
+  min-height: 100dvh;
 }
+
+.app-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 1rem; flex-wrap: wrap; margin-bottom: 1rem; }
+.app-brand { min-width: 0; }
+.app-brand h1 { color: var(--primary); font-size: 1.75rem; }
+.app-brand p { margin-top: 0.5rem; font-size: 0.9rem; }
+.backup-menu { max-width: 100%; }
+.backup-menu summary { min-height: 44px; padding: 0.6rem 0.75rem; cursor: pointer; color: var(--text-secondary); font-weight: 500; }
+.backup-actions { display: flex; flex-wrap: wrap; gap: 0.5rem; padding: 0.5rem 0; }
+.app-nav { display: flex; gap: 0.5rem; margin-bottom: 1.25rem; }
+.app-content { background: var(--bg-card); padding: 2rem; border-radius: var(--radius); box-shadow: var(--shadow-sm); min-width: 0; }
+.app-status { padding: 0.75rem; margin-bottom: 1rem; border-radius: 8px; background: var(--primary-light); overflow-wrap: anywhere; }
+.app-error { color: #991b1b; background: var(--danger-bg); }
+.skip-link { position: absolute; left: 1rem; top: -100px; z-index: 1000; background: white; padding: 0.75rem; }
+.skip-link:focus { top: 0.5rem; }
+
+button, summary { touch-action: manipulation; }
+button { font: inherit; cursor: pointer; }
+button:disabled { cursor: not-allowed; opacity: 0.5; }
+button, .btn-icon { min-width: 44px; min-height: 44px; }
+:where(button, summary, select, a, [tabindex]):focus-visible { outline: 3px solid var(--border-focus); outline-offset: 3px; }
+input, textarea, select { min-width: 0; max-width: 100%; }
+select { font: inherit; min-height: 44px; border: 1px solid var(--border); border-radius: 8px; color: var(--text-main); background: white; padding: 0.5rem; }
+textarea { resize: vertical; }
+[hidden] { display: none !important; }
+html { scroll-padding-top: 5rem; }
 
 /* Typography */
 h1,
@@ -227,4 +253,26 @@ label {
 
 .animate-fade-in {
   animation: fadeIn 0.4s ease-out forwards;
+}
+
+@media (max-width: 800px) {
+  .app-container { padding: max(1rem, env(safe-area-inset-top)) max(0.75rem, env(safe-area-inset-right)) max(1.5rem, env(safe-area-inset-bottom)) max(0.75rem, env(safe-area-inset-left)); }
+  .app-header { gap: 0.5rem; margin-bottom: 0.5rem; }
+  .app-brand h1 { font-size: 1.5rem; }
+  .backup-menu { width: 100%; }
+  .backup-actions .btn { flex: 1 1 auto; }
+  .app-nav { position: sticky; top: 0; z-index: 20; padding: max(0.5rem, env(safe-area-inset-top)) 0 0.5rem; background: var(--bg-app); margin-bottom: 0.5rem; }
+  .app-nav .btn { flex: 1; min-width: 0; padding-inline: 0.5rem; }
+  .app-content { padding: 1rem; }
+  h2 { font-size: 1.25rem; }
+  input, textarea, select { font-size: 16px !important; }
+}
+
+@media (hover: none) {
+  .card:hover, .btn-primary:hover:not(:disabled) { transform: none; }
+  .btn:active, .btn-icon:active { filter: brightness(0.95); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; }
 }
