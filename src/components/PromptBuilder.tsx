@@ -1,1002 +1,425 @@
-import { useState, useMemo } from 'react';
+import { useMemo, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
+import type { DragEvent, SyntheticEvent } from 'react';
 import { useStore } from '../store';
 import { PRESET_COLORS } from '../types';
+import type { Block, PromptSegment } from '../types';
+import { copyText } from '../utils/clipboard';
+import { usePointerDrag } from '../hooks/usePointerDrag';
+import { applyBuilderDrop } from '../utils/builderDrag';
+import type { BuilderDragSource } from '../utils/builderDrag';
+import './PromptBuilder.css';
+
+const COLOR_NAMES = ['Indigo', 'Violet', 'Pink', 'Red', 'Orange', 'Yellow', 'Green', 'Teal', 'Sky', 'Slate'];
 
 export function PromptBuilder() {
     const { blocks, prompts, savePrompt, editPromptId, setEditPromptId, addBlock, builderState, setBuilderState, updateBlock, folders } = useStore();
-
-
-    // Helper to update partial state
+    const { title, notes, rating, folderId } = builderState;
+    const segments = builderState.segments as PromptSegment[];
     const updateState = (updates: Partial<typeof builderState>) => {
-        setBuilderState((prev: any) => ({ ...prev, ...updates }));
+        setBuilderState((previous: typeof builderState) => ({ ...previous, ...updates }));
+        setCopied(false);
+        setStatus('');
     };
 
-    const segments = builderState.segments;
-    const title = builderState.title;
-    const notes = builderState.notes;
-    const rating = builderState.rating;
-    const folderId = builderState.folderId;
-
-    // Copy feedback state
+    const [blocksExpanded, setBlocksExpanded] = useState(false);
+    const [status, setStatus] = useState('');
     const [copied, setCopied] = useState(false);
-
-    // Load prompt for editing if selected from somewhere (optional future feature)
-    // For now, we'll just stick to creation/editing flow within this component
-
-    // Check if we are editing an existing prompt
-
-    // We need to know if we are editing.
-    // Let's add a way to select a prompt to edit from the Library, OR
-    // since the user asked to "edit existing prompts", let's assume we might receive an ID or selection state.
-    // For this step, I'll focus on the Builder UI supporting segments first.
-
+    const [copiedBlockId, setCopiedBlockId] = useState<string | null>(null);
     const [selection, setSelection] = useState<{ index: number; start: number; end: number; text: string } | null>(null);
-
-    // Block editing state
     const [editingBlockId, setEditingBlockId] = useState<string | null>(null);
     const [editBlockName, setEditBlockName] = useState('');
     const [editBlockContent, setEditBlockContent] = useState('');
-    const [editBlockColor, setEditBlockColor] = useState<string | undefined>(undefined);
-
-
-    // Block filter/sort state
+    const [editBlockColor, setEditBlockColor] = useState<string | undefined>();
     const [searchQuery, setSearchQuery] = useState('');
-    const [filterColor, setFilterColor] = useState<string | 'none' | null>(null);
-    const [sortByBlocks, setSortByBlocks] = useState<'newest' | 'oldest' | 'az' | 'za' | 'color'>('newest');
-    const [copiedBlockId, setCopiedBlockId] = useState<string | null>(null);
+    const [filterColor, setFilterColor] = useState<string | null>(null);
+    const [sortByBlocks, setSortByBlocks] = useState('newest');
+    const [dragOverIndex, setDragOverIndex] = useState<number | null>(null);
+    const [isDragging, setIsDragging] = useState(false);
+    const [dragSourceIndex, setDragSourceIndex] = useState<number | null>(null);
+    const segmentsElement = useRef<HTMLDivElement>(null);
 
-    // Calculate usage counts for blocks in the current prompt
+    const dropIntoBuilder = (source: BuilderDragSource, gap: number) => {
+        if (source.kind === 'block' && !blocks.some(block => block.id === source.id)) return;
+        const next = applyBuilderDrop(segments, source, gap);
+        if (next === segments) return;
+        updateState({ segments: next });
+        setSelection(null);
+        setStatus(source.kind === 'block' ? 'Block added at the drop position.' : 'Prompt order updated.');
+    };
+
+    const pointerDrag = usePointerDrag<BuilderDragSource, number>({
+        getLabel: source => source.kind === 'block' ? blocks.find(block => block.id === source.id)?.name || 'Block' : `Item ${source.index + 1}`,
+        getTarget: (x, y) => {
+            const zone = segmentsElement.current;
+            const hit = document.elementFromPoint(x, y);
+            if (!zone || !hit || !zone.contains(hit)) return null;
+            const items = Array.from(zone.querySelectorAll<HTMLElement>('[data-builder-index]'));
+            if (!items.length) return 0;
+            // Nearest card also handles the gaps between wrapped rows of segments.
+            const nearest = items.reduce((best, item) => {
+                const rect = item.getBoundingClientRect();
+                const dx = Math.max(rect.left - x, 0, x - rect.right);
+                const dy = Math.max(rect.top - y, 0, y - rect.bottom);
+                const distance = dx * dx + dy * dy;
+                return distance < best.distance ? { item, distance } : best;
+            }, { item: items[0], distance: Infinity }).item;
+            const rect = nearest.getBoundingClientRect();
+            const index = Number(nearest.dataset.builderIndex);
+            const vertical = window.matchMedia('(max-width: 800px)').matches || rect.width > zone.clientWidth * 0.8;
+            const before = y < rect.top || (y <= rect.bottom && (vertical ? y < rect.top + rect.height / 2 : x < rect.left + rect.width / 2));
+            return before ? index : index + 1;
+        },
+        onDrop: dropIntoBuilder,
+    });
+    const activeDrag = pointerDrag.drag;
+    const activeDropIndex = activeDrag ? activeDrag.target : dragOverIndex;
+    const activeSourceIndex = activeDrag ? (activeDrag.source.kind === 'segment' ? activeDrag.source.index : null) : dragSourceIndex;
+    const dragging = !!activeDrag || isDragging;
+
     const blockUsageCounts = useMemo(() => {
         const counts: Record<string, number> = {};
-        if (segments) {
-            segments.forEach((seg: any) => {
-                if (seg.type === 'block' && seg.blockId) {
-                    counts[seg.blockId] = (counts[seg.blockId] || 0) + 1;
-                }
-            });
-        }
+        segments.forEach(segment => {
+            if (segment.type === 'block') counts[segment.blockId] = (counts[segment.blockId] || 0) + 1;
+        });
         return counts;
     }, [segments]);
 
-    // Filtered and Sorted blocks
-    const filteredBlocks = useMemo(() => {
-        return blocks
-            .filter(block => {
-                const matchesSearch = !searchQuery ||
-                    block.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
-                    block.content.toLowerCase().includes(searchQuery.toLowerCase());
+    const filteredBlocks = useMemo(() => blocks.filter(block => {
+        const query = searchQuery.toLowerCase();
+        const matchesSearch = !query || block.name.toLowerCase().includes(query) || block.content.toLowerCase().includes(query);
+        const matchesColor = filterColor === 'none' ? !block.color : !filterColor || block.color === filterColor;
+        return matchesSearch && matchesColor;
+    }).sort((a, b) => {
+        if (sortByBlocks === 'oldest') return a.createdAt - b.createdAt;
+        if (sortByBlocks === 'az') return a.name.localeCompare(b.name);
+        if (sortByBlocks === 'za') return b.name.localeCompare(a.name);
+        if (sortByBlocks === 'color') return (a.color || '').localeCompare(b.color || '');
+        return b.createdAt - a.createdAt;
+    }), [blocks, searchQuery, filterColor, sortByBlocks]);
 
-                let matchesColor = true;
-                if (filterColor === 'none') {
-                    matchesColor = !block.color;
-                } else if (filterColor) {
-                    matchesColor = block.color === filterColor;
-                }
-                return matchesSearch && matchesColor;
-            })
-            .sort((a, b) => {
-                if (sortByBlocks === 'newest') return b.createdAt - a.createdAt;
-                if (sortByBlocks === 'oldest') return a.createdAt - b.createdAt;
-                if (sortByBlocks === 'az') return a.name.localeCompare(b.name);
-                if (sortByBlocks === 'za') return b.name.localeCompare(a.name);
-                if (sortByBlocks === 'color') return (a.color || '').localeCompare(b.color || '');
-                return 0;
-            });
-    }, [blocks, searchQuery, filterColor, sortByBlocks]);
+    const preview = useMemo(() => segments.map((segment, index) => {
+        const content = segment.type === 'block'
+            ? blocks.find(block => block.id === segment.blockId)?.content || ''
+            : segment.type === 'newline' ? '\n' : segment.content;
+        const prefix = index > 0 && segments[index - 1].type !== 'newline' && segment.type !== 'newline' ? ' ' : '';
+        return prefix + content;
+    }).join(''), [segments, blocks]);
+    const wordCount = preview.trim().split(/\s+/).filter(Boolean).length;
 
-    const startEditingBlock = (block: any) => {
+    const startEditingBlock = (block: Block) => {
         setEditingBlockId(block.id);
         setEditBlockName(block.name);
         setEditBlockContent(block.content);
         setEditBlockColor(block.color);
     };
 
-
     const saveBlockEdit = (id: string) => {
         if (!editBlockName.trim() || !editBlockContent.trim()) return;
-        updateBlock(id, {
-            name: editBlockName,
-            content: editBlockContent,
-            color: editBlockColor
-        });
+        updateBlock(id, { name: editBlockName, content: editBlockContent, color: editBlockColor });
         setEditingBlockId(null);
+        setCopied(false);
+        setCopiedBlockId(null);
+        setStatus('Block updated.');
     };
 
-
-    // Hydrate form when editing
-    // Removed to allow persistence: Hydration now happens in App.tsx handleEdit
-    // useEffect(() => { ... }, [editPromptId, prompts]);
-
-    const handleTextSelect = (index: number, e: React.SyntheticEvent<HTMLTextAreaElement | HTMLInputElement>) => {
-        const target = e.target as HTMLTextAreaElement | HTMLInputElement;
+    const handleTextSelect = (index: number, event: SyntheticEvent<HTMLTextAreaElement>) => {
+        const target = event.currentTarget;
         const start = target.selectionStart;
         const end = target.selectionEnd;
-
-        if (start !== null && end !== null && start !== end) {
-            const text = target.value.substring(start, end);
-            setSelection({ index, start, end, text });
-        } else {
-            setSelection(null);
-        }
+        setSelection(start !== end ? { index, start, end, text: target.value.substring(start, end) } : null);
     };
 
     const createBlockFromSelection = () => {
         if (!selection) return;
-
-        const name = prompt('Name for this new block:', selection.text);
-        if (!name) return;
-
-        // Create the block
-        const newBlockId = addBlock({ name, content: selection.text });
-
-        // Split the segment
-        const newSegments = [...segments];
-        const targetSeg = newSegments[selection.index];
-        if (targetSeg.type !== 'text') return; // Should be text
-
-        const originalText = targetSeg.content;
-        const preText = originalText.substring(0, selection.start);
-        const postText = originalText.substring(selection.end);
-
-        const replacement: any[] = [];
-        if (preText) replacement.push({ type: 'text', content: preText });
-        replacement.push({ type: 'block', blockId: newBlockId });
-        if (postText) replacement.push({ type: 'text', content: postText });
-
-        newSegments.splice(selection.index, 1, ...replacement);
-
-        updateState({ segments: newSegments });
-
+        const target = segments[selection.index];
+        if (!target || target.type !== 'text' || target.content.substring(selection.start, selection.end) !== selection.text) {
+            setSelection(null);
+            return;
+        }
+        const name = window.prompt('Name for this new block:', selection.text);
+        if (!name?.trim()) return;
+        const blockId = addBlock({ name: name.trim(), content: selection.text });
+        const before = target.content.substring(0, selection.start);
+        const after = target.content.substring(selection.end);
+        const replacement: PromptSegment[] = [];
+        if (before) replacement.push({ type: 'text', content: before });
+        replacement.push({ type: 'block', blockId });
+        if (after) replacement.push({ type: 'text', content: after });
+        const updated = [...segments];
+        updated.splice(selection.index, 1, ...replacement);
+        updateState({ segments: updated });
         setSelection(null);
+        setStatus(`Created block: ${name.trim()}.`);
     };
-
-    const preview = useMemo(() => {
-        let result = "";
-        segments.forEach((seg, i) => {
-            let content = "";
-            if (seg.type === 'block') content = blocks.find(b => b.id === seg.blockId)?.content || '';
-            else if (seg.type === 'newline') content = '\n';
-            else content = seg.content;
-
-            // Add space between non-newline segments
-            if (i > 0 && segments[i - 1].type !== 'newline' && seg.type !== 'newline') {
-                result += " ";
-            }
-            result += content;
-        });
-        return result;
-    }, [segments, blocks]);
-
-    const wordCount = useMemo(() => {
-        return preview.trim().split(/\s+/).filter(w => w.length > 0).length;
-    }, [preview]);
-
-    const charCount = preview.length;
-
 
     const addBlockSegment = (blockId: string) => {
         updateState({ segments: [...segments, { type: 'block', blockId }] });
+        setSelection(null);
+        setStatus(`Added ${blocks.find(block => block.id === blockId)?.name || 'block'} to prompt.`);
     };
 
     const addTextSegment = () => {
         updateState({ segments: [...segments, { type: 'text', content: '' }] });
+        setSelection(null);
     };
 
     const addNewlineSegment = () => {
         updateState({ segments: [...segments, { type: 'newline' }] });
+        setSelection(null);
     };
 
     const removeSegment = (index: number) => {
-        updateState({ segments: segments.filter((_: any, i: number) => i !== index) });
+        updateState({ segments: segments.filter((_, segmentIndex) => segmentIndex !== index) });
+        setSelection(null);
+    };
+
+    const moveSegment = (index: number, offset: number) => {
+        const destination = index + offset;
+        if (destination < 0 || destination >= segments.length) return;
+        const updated = [...segments];
+        const [segment] = updated.splice(index, 1);
+        updated.splice(destination, 0, segment);
+        updateState({ segments: updated });
+        setSelection(null);
+        setStatus(`Moved item ${index + 1} to position ${destination + 1}.`);
     };
 
     const updateTextSegment = (index: number, content: string) => {
-        updateState({ segments: segments.map((s: any, i: number) => i === index && s.type === 'text' ? { ...s, content } : s) });
+        updateState({ segments: segments.map((segment, segmentIndex) => segmentIndex === index && segment.type === 'text' ? { ...segment, content } : segment) });
+        setSelection(null);
+        setCopied(false);
     };
 
     const handleCancel = () => {
         setEditPromptId(null);
-        updateState({
-            title: '',
-            segments: [],
-            rating: 0,
-            notes: ''
-        });
+        updateState({ title: '', segments: [], rating: 0, notes: '', folderId: undefined });
+        setSelection(null);
+        setStatus('Edit cancelled.');
     };
 
-    const handleSave = () => {
-        if (segments.length === 0) return;
+    const hasDraft = segments.length > 0 || Boolean(title || notes || rating || folderId || editPromptId);
+    const handleClearDraft = () => {
+        if (hasDraft && !window.confirm('Clear the current draft and start a new prompt? Saved prompts and blocks will stay.')) return;
+        setEditPromptId(null);
+        updateState({ title: '', segments: [], rating: 0, notes: '', folderId: undefined });
+        setSelection(null);
+        setStatus('Draft cleared. Ready for a new prompt.');
+    };
 
+    const handleSave = (asNew = false) => {
+        if (segments.length === 0) return;
         let finalTitle = title.trim();
         if (!finalTitle) {
             const now = new Date();
-            const dateStr = now.toLocaleDateString();
-            const timeStr = now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false });
-            finalTitle = `${dateStr} ${timeStr}`;
+            finalTitle = `${now.toLocaleDateString()} ${now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false })}`;
+        } else if (asNew && prompts.find(prompt => prompt.id === editPromptId)?.title === finalTitle) {
+            finalTitle += ' (Copy)';
         }
-
         const savedId = savePrompt({
-            id: editPromptId || undefined,
-            title: finalTitle,
-            segments,
-            rating,
-            notes,
-            folderId: folderId || undefined
+            id: asNew ? undefined : editPromptId || undefined,
+            title: finalTitle, segments, rating, notes, folderId: folderId || undefined
         });
-
         if (savedId) {
             setEditPromptId(savedId);
             updateState({ title: finalTitle });
+            setStatus(asNew ? 'Saved a new copy to Library.' : 'Prompt saved to Library.');
         }
     };
 
-    const handleSaveAs = () => {
-        if (segments.length === 0) return;
-
-        let finalTitle = title.trim();
-        if (!finalTitle) {
-            const now = new Date();
-            const dateStr = now.toLocaleDateString();
-            const timeStr = now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false });
-            finalTitle = `${dateStr} ${timeStr}`;
-        } else {
-            // Only append " (Copy)" if it's the same as the original title
-            const originalPrompt = prompts.find(p => p.id === editPromptId);
-            if (originalPrompt && finalTitle === originalPrompt.title) {
-                finalTitle = `${finalTitle} (Copy)`;
-            }
-        }
-
-        const savedId = savePrompt({
-            id: undefined, // Force new ID
-            title: finalTitle,
-            segments,
-            rating,
-            notes,
-            folderId: folderId || undefined
-        });
-
-        if (savedId) {
-            setEditPromptId(savedId);
-            updateState({ title: finalTitle });
-        }
-    };
-
-    // DnD State
-    const [dragOverIndex, setDragOverIndex] = useState<number | null>(null);
-    const [isDragging, setIsDragging] = useState(false);
-    const [dragSourceIndex, setDragSourceIndex] = useState<number | null>(null);
-
-    // Drag from sidebar (new block)
-    const handleBlockDragStart = (e: React.DragEvent, blockId: string) => {
-        e.dataTransfer.setData('blockId', blockId);
-        e.dataTransfer.setData('source', 'sidebar');
-        e.dataTransfer.effectAllowed = 'copy';
-        setIsDragging(true);
-        setDragSourceIndex(null);
-    };
-
-    // Drag existing segment (reorder)
-    const handleSegmentDragStart = (e: React.DragEvent, index: number) => {
-        e.dataTransfer.setData('segmentIndex', String(index));
-        e.dataTransfer.setData('source', 'segment');
-        e.dataTransfer.effectAllowed = 'move';
-        setIsDragging(true);
-        setDragSourceIndex(index);
-    };
-
-    const handleDragOver = (e: React.DragEvent, index: number) => {
-        e.preventDefault();
-        setDragOverIndex(index);
-    };
-
-    const handleDrop = (e: React.DragEvent, dropIndex: number) => {
-        e.preventDefault();
-        const source = e.dataTransfer.getData('source');
-
-        if (source === 'sidebar') {
-            // Adding new block from sidebar
-            const blockId = e.dataTransfer.getData('blockId');
+    const handleCopy = async (text: string, blockId?: string) => {
+        setStatus('');
+        try {
+            await copyText(text);
             if (blockId) {
-                const newSegments = [...segments];
-                newSegments.splice(dropIndex, 0, { type: 'block', blockId });
-                updateState({ segments: newSegments });
+                setCopiedBlockId(blockId);
+                window.setTimeout(() => setCopiedBlockId(null), 2000);
+            } else {
+                setCopied(true);
+                window.setTimeout(() => setCopied(false), 2000);
             }
-        } else if (source === 'segment') {
-            // Reordering existing segment
-            const fromIndex = parseInt(e.dataTransfer.getData('segmentIndex'), 10);
-            if (!isNaN(fromIndex) && fromIndex !== dropIndex) {
-                const newSegments = [...segments];
-                const [movedItem] = newSegments.splice(fromIndex, 1);
-                // Adjust drop index if moving forward
-                const adjustedIndex = fromIndex < dropIndex ? dropIndex - 1 : dropIndex;
-                newSegments.splice(adjustedIndex, 0, movedItem);
-                updateState({ segments: newSegments });
-            }
+            setStatus(blockId ? 'Block copied.' : 'Prompt copied.');
+        } catch {
+            setStatus('Copy failed. Select the text and use your device’s Copy option.');
         }
+    };
 
+    const resetDrag = () => {
         setDragOverIndex(null);
         setIsDragging(false);
         setDragSourceIndex(null);
     };
 
+    const handleBlockDragStart = (event: DragEvent, blockId: string) => {
+        event.dataTransfer.setData('blockId', blockId);
+        event.dataTransfer.setData('source', 'sidebar');
+        event.dataTransfer.effectAllowed = 'copy';
+        setIsDragging(true);
+        setDragSourceIndex(null);
+    };
+
+    const handleSegmentDragStart = (event: DragEvent, index: number) => {
+        event.dataTransfer.setData('segmentIndex', String(index));
+        event.dataTransfer.setData('source', 'segment');
+        event.dataTransfer.effectAllowed = 'move';
+        setIsDragging(true);
+        setDragSourceIndex(index);
+    };
+
+    const handleDrop = (event: DragEvent, dropIndex: number) => {
+        event.preventDefault();
+        const source = event.dataTransfer.getData('source');
+        if (source === 'sidebar') {
+            const blockId = event.dataTransfer.getData('blockId');
+            dropIntoBuilder({ kind: 'block', id: blockId }, dropIndex);
+        } else if (source === 'segment') {
+            const fromIndex = Number.parseInt(event.dataTransfer.getData('segmentIndex'), 10);
+            dropIntoBuilder({ kind: 'segment', index: fromIndex }, dropIndex);
+        }
+        setSelection(null);
+        resetDrag();
+    };
+
+    const getDropPosition = (event: DragEvent<HTMLDivElement>, index: number) => {
+        const bounds = event.currentTarget.getBoundingClientRect();
+        const before = window.matchMedia('(max-width: 800px)').matches
+            ? event.clientY < bounds.top + bounds.height / 2
+            : event.clientX < bounds.left + bounds.width / 2;
+        return before ? index : index + 1;
+    };
 
     return (
-        <div style={{ display: 'grid', gridTemplateColumns: '320px 1fr', gap: '2rem', minHeight: 'calc(100vh - 200px)' }}
-            onDragEnd={() => { setDragOverIndex(null); setIsDragging(false); setDragSourceIndex(null); }}
-        >
-            {/* Sidebar: Available Blocks */}
-            <div style={{
-                borderRight: '1px solid var(--border)',
-                paddingRight: '1.5rem',
-                overflowY: 'auto',
-                display: 'flex',
-                flexDirection: 'column',
-                gap: '1rem'
-            }}>
-                <h2 className="text-lg">Available Blocks</h2>
-
-                {/* Search */}
-                <input
-                    type="text"
-                    placeholder="Search blocks..."
-                    value={searchQuery}
-                    onChange={(e) => setSearchQuery(e.target.value)}
-                    style={{
-                        padding: '0.5rem',
-                        border: '1px solid var(--border)',
-                        borderRadius: '6px',
-                        fontSize: '0.85rem'
-                    }}
-                />
-
-                {/* Sort Dropdown */}
-                <select
-                    value={sortByBlocks}
-                    onChange={(e) => setSortByBlocks(e.target.value as any)}
-                    style={{
-                        width: '100%',
-                        padding: '0.4rem',
-                        borderRadius: '6px',
-                        border: '1px solid var(--border)',
-                        fontSize: '0.8rem',
-                        background: 'var(--bg-app)'
-                    }}
-                >
-                    <option value="newest">Newest First</option>
-                    <option value="oldest">Oldest First</option>
-                    <option value="az">A-Z</option>
-                    <option value="za">Z-A</option>
-                    <option value="color">By Color</option>
-                </select>
-
-                {/* Color Filter */}
-                <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.25rem', alignItems: 'center' }}>
-                    <button
-                        onClick={() => setFilterColor(null)}
-                        style={{
-                            width: '28px',
-                            height: '20px',
-                            borderRadius: '4px',
-                            border: filterColor === null ? '2px solid var(--primary)' : '1px solid var(--border)',
-                            background: filterColor === null ? 'var(--primary-bg)' : 'white',
-                            color: filterColor === null ? 'var(--primary)' : 'var(--text-muted)',
-                            cursor: 'pointer',
-                            fontSize: '0.65rem',
-                            fontWeight: 700,
-                            display: 'flex',
-                            alignItems: 'center',
-                            justifyContent: 'center'
-                        }}
-                        title="All"
-                    >ALL</button>
-
-                    <button
-                        onClick={() => setFilterColor(filterColor === 'none' ? null : 'none')}
-                        style={{
-                            width: '20px',
-                            height: '20px',
-                            border: filterColor === 'none' ? '2px solid var(--text-main)' : '1px solid var(--border)',
-                            borderRadius: '50%',
-                            background: 'white',
-                            cursor: 'pointer',
-                            display: 'flex',
-                            alignItems: 'center',
-                            justifyContent: 'center',
-                            position: 'relative',
-                            overflow: 'hidden'
-                        }}
-                        title="No color"
-                    >
-                        <div style={{
-                            position: 'absolute',
-                            width: '100%',
-                            height: '1.2px',
-                            background: 'var(--text-muted)',
-                            transform: 'rotate(-45deg)',
-                            opacity: 0.6
-                        }} />
-                    </button>
-                    {PRESET_COLORS.map(color => (
-                        <button
-                            key={color}
-                            onClick={() => setFilterColor(filterColor === color ? null : color)}
-                            style={{
-                                width: '20px',
-                                height: '20px',
-                                border: filterColor === color ? '2px solid var(--text-main)' : '2px solid transparent',
-                                borderRadius: '50%',
-                                background: color,
-                                cursor: 'pointer',
-                                transition: 'transform 0.2s',
-                                transform: filterColor === color ? 'scale(1.1)' : 'scale(1)'
-                            }}
-                        />
-                    ))}
-                </div>
-
-                <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
-                    {filteredBlocks.map(block => (
-                        <div key={block.id} style={{ position: 'relative' }}>
-                            {editingBlockId === block.id ? (
-                                <div className="card" style={{ padding: '0.75rem', border: '1px solid var(--primary)' }}>
-                                    {/* ... existing edit inputs ... */}
-                                    <input
-                                        autoFocus
-                                        value={editBlockName}
-                                        onChange={e => setEditBlockName(e.target.value)}
-                                        placeholder="Block Name"
-                                        style={{ width: '100%', marginBottom: '0.5rem', fontWeight: 600 }}
-                                    />
-                                    <textarea
-                                        value={editBlockContent}
-                                        onChange={e => setEditBlockContent(e.target.value)}
-                                        placeholder="Block Content"
-                                        rows={3}
-                                        style={{ width: '100%', marginBottom: '0.75rem', fontSize: '0.85rem' }}
-                                    />
-                                    <div style={{ marginBottom: '0.75rem' }}>
-                                        <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.4rem' }}>
-                                            <button
-                                                type="button"
-                                                onClick={() => setEditBlockColor(undefined)}
-                                                style={{
-                                                    width: '20px',
-                                                    height: '20px',
-                                                    border: !editBlockColor ? '2px solid var(--primary)' : '1px solid var(--border)',
-                                                    borderRadius: '50%',
-                                                    background: 'white',
-                                                    cursor: 'pointer',
-                                                    display: 'flex',
-                                                    alignItems: 'center',
-                                                    justifyContent: 'center',
-                                                    position: 'relative',
-                                                    overflow: 'hidden'
-                                                }}
-                                                title="No color"
-                                            >
-                                                <div style={{
-                                                    position: 'absolute',
-                                                    width: '100%',
-                                                    height: '1.2px',
-                                                    background: 'var(--text-muted)',
-                                                    transform: 'rotate(-45deg)',
-                                                    opacity: 0.6
-                                                }} />
-                                            </button>
-                                            {PRESET_COLORS.map(c => (
-                                                <button
-                                                    type="button"
-                                                    key={c}
-                                                    onClick={() => setEditBlockColor(c)}
-                                                    style={{
-                                                        width: '20px',
-                                                        height: '20px',
-                                                        border: editBlockColor === c ? '2px solid var(--text-main)' : '2px solid transparent',
-                                                        borderRadius: '50%',
-                                                        background: c,
-                                                        cursor: 'pointer'
-                                                    }}
-                                                />
-                                            ))}
-                                        </div>
-                                    </div>
-
-                                    <div style={{ display: 'flex', gap: '0.5rem', justifyContent: 'flex-end' }}>
-                                        <button onClick={() => setEditingBlockId(null)} className="btn btn-sm btn-secondary">Cancel</button>
-                                        <button onClick={() => saveBlockEdit(block.id)} className="btn btn-sm btn-primary">Save</button>
-                                    </div>
+        <div className="prompt-builder" onDragEnd={resetDrag}>
+            {activeDrag && createPortal(<div className="pointer-drag-preview" aria-hidden="true" style={{ left: activeDrag.x, top: activeDrag.y }}>
+                <strong>{activeDrag.label}</strong><span>{activeDrag.target === null ? 'Drag into the prompt editor' : 'Release to place here'}</span>
+            </div>, document.body)}
+            <aside className="builder-sidebar" aria-label="Available blocks">
+                <h2 className="builder-sidebar-title">Available Blocks</h2>
+                <button className="builder-blocks-toggle btn btn-secondary" aria-expanded={blocksExpanded} aria-controls="builder-available-blocks" onClick={() => setBlocksExpanded(!blocksExpanded)}>
+                    <span>Available Blocks <span className="builder-count">{blocks.length}</span></span>
+                    <span>{blocksExpanded ? 'Hide ▴' : 'Show ▾'}</span>
+                </button>
+                <div id="builder-available-blocks" className={`builder-blocks-panel ${blocksExpanded ? 'is-expanded' : ''}`}>
+                    <input aria-label="Search available blocks" type="search" placeholder="Search blocks..." value={searchQuery} onChange={event => setSearchQuery(event.target.value)} />
+                    <select aria-label="Sort available blocks" value={sortByBlocks} onChange={event => setSortByBlocks(event.target.value)}>
+                        <option value="newest">Newest First</option><option value="oldest">Oldest First</option>
+                        <option value="az">A-Z</option><option value="za">Z-A</option><option value="color">By Color</option>
+                    </select>
+                    <div className="builder-colors" role="group" aria-label="Filter blocks by color">
+                        <button className="builder-color-all" aria-label="Show all block colors" aria-pressed={filterColor === null} onClick={() => setFilterColor(null)}>ALL</button>
+                        <button className="builder-color" aria-label="Show blocks without a color" aria-pressed={filterColor === 'none'} onClick={() => setFilterColor(filterColor === 'none' ? null : 'none')} title="No color"><span className="builder-color-swatch is-empty" /></button>
+                        {PRESET_COLORS.map((color, index) => (
+                            <button key={color} className="builder-color" aria-label={`Filter ${COLOR_NAMES[index]} blocks`} title={COLOR_NAMES[index]} aria-pressed={filterColor === color} onClick={() => setFilterColor(filterColor === color ? null : color)}><span className="builder-color-swatch" style={{ backgroundColor: color }} /></button>
+                        ))}
+                    </div>
+                    <p className="builder-hint">Tap a block to add it, or hold its ⠿ handle and drag it into the editor.</p>
+                    <div className="builder-block-list">
+                        {filteredBlocks.map(block => editingBlockId === block.id ? (
+                            <div key={block.id} className="card builder-edit-block">
+                                <label htmlFor={`builder-block-name-${block.id}`}>Block name</label>
+                                <input id={`builder-block-name-${block.id}`} autoFocus value={editBlockName} onChange={event => setEditBlockName(event.target.value)} />
+                                <label htmlFor={`builder-block-content-${block.id}`}>Block content</label>
+                                <textarea id={`builder-block-content-${block.id}`} rows={3} value={editBlockContent} onChange={event => setEditBlockContent(event.target.value)} />
+                                <div className="builder-colors" role="group" aria-label="Block color">
+                                    <button className="builder-color" aria-label="No block color" aria-pressed={!editBlockColor} onClick={() => setEditBlockColor(undefined)}><span className="builder-color-swatch is-empty" /></button>
+                                    {PRESET_COLORS.map((color, index) => <button key={color} className="builder-color" aria-label={`${COLOR_NAMES[index]} block color`} aria-pressed={editBlockColor === color} onClick={() => setEditBlockColor(color)}><span className="builder-color-swatch" style={{ backgroundColor: color }} /></button>)}
                                 </div>
-                            ) : (
-                                <div
-                                    className="card hover-trigger"
-                                    draggable
-                                    onDragStart={(e) => handleBlockDragStart(e, block.id)}
-                                    style={{
-                                        padding: '0.5rem 0.75rem',
-                                        cursor: 'grab',
-                                        borderLeft: `3px solid ${block.color || 'var(--primary)'}`,
-                                        background: block.color ? `${block.color}08` : undefined,
-                                        display: 'flex',
-                                        justifyContent: 'space-between',
-                                        alignItems: 'center',
-                                        transition: 'all 0.2s'
-                                    }}
-                                >
-                                    <div onClick={() => addBlockSegment(block.id)} style={{ flex: 1, minWidth: 0, paddingRight: '0.5rem' }}>
-                                        <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: '0.5rem', marginBottom: '2px' }}>
-                                            <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
-                                                {block.color && (
-                                                    <div style={{
-                                                        width: '8px',
-                                                        height: '8px',
-                                                        borderRadius: '50%',
-                                                        background: block.color,
-                                                        flexShrink: 0
-                                                    }} />
-                                                )}
-                                                <span style={{ fontWeight: 500, fontSize: '0.9rem', lineHeight: '1.3' }}>{block.name}</span>
-                                            </div>
-                                            {blockUsageCounts[block.id] ? (
-                                                <span style={{
-                                                    fontSize: '0.65rem',
-                                                    background: 'var(--primary)',
-                                                    color: 'white',
-                                                    padding: '1px 6px',
-                                                    borderRadius: '99px',
-                                                    fontWeight: 600,
-                                                    lineHeight: '1.2',
-                                                    whiteSpace: 'nowrap',
-                                                    flexShrink: 0,
-                                                    alignSelf: 'flex-start',
-                                                    marginTop: '2px'
-                                                }} title={`Used ${blockUsageCounts[block.id]} time(s)`}>
-                                                    {blockUsageCounts[block.id]}
-                                                </span>
-                                            ) : null}
-                                        </div>
-                                        <div
-                                            title={block.content}
-                                            style={{
-                                                fontSize: '0.75rem',
-                                                color: 'var(--text-secondary)',
-                                                whiteSpace: 'nowrap',
-                                                overflow: 'hidden',
-                                                textOverflow: 'ellipsis'
-                                            }}
-                                        >
-                                            {block.content}
-                                        </div>
-                                    </div>
-                                    <div className="actions" style={{ display: 'flex', gap: '0.25rem', opacity: 0.6 }}>
-                                        <button
-                                            onClick={(e) => {
-                                                e.stopPropagation();
-                                                navigator.clipboard.writeText(block.content);
-                                                setCopiedBlockId(block.id);
-                                                setTimeout(() => setCopiedBlockId(null), 2000);
-                                            }}
-                                            className="btn-icon"
-                                            title="Copy content"
-                                            style={{ color: copiedBlockId === block.id ? 'var(--success)' : 'inherit', padding: '4px' }}
-                                        >
-                                            {copiedBlockId === block.id ? '✓' : '📋'}
-                                        </button>
-                                        <button
-                                            onClick={(e) => {
-                                                e.stopPropagation();
-                                                startEditingBlock(block);
-                                            }}
-                                            className="btn-icon"
-                                            style={{ opacity: 0.5, padding: '4px' }}
-                                            title="Edit Block"
-                                        >
-                                            ✎
-                                        </button>
-                                    </div>
+                                <div className="builder-actions">
+                                    <button onClick={() => setEditingBlockId(null)} className="btn btn-secondary">Cancel</button>
+                                    <button onClick={() => saveBlockEdit(block.id)} disabled={!editBlockName.trim() || !editBlockContent.trim()} className="btn btn-primary">Save</button>
                                 </div>
-                            )}
-                        </div>
-                    ))}
-                    {blocks.length === 0 && (
-                        <p className="text-muted text-sm">No blocks. Create some first.</p>
-                    )}
+                            </div>
+                        ) : (
+                            <div key={block.id} className="card builder-block-card" draggable onDragStart={event => handleBlockDragStart(event, block.id)} style={{ borderLeftColor: block.color || 'var(--primary)', background: block.color ? `${block.color}08` : undefined }}>
+                                <button type="button" className="btn-icon pointer-drag-handle" aria-label={`Drag ${block.name} into prompt`} title="Hold and drag into prompt" draggable={false} {...pointerDrag.getHandleProps({ kind: 'block', id: block.id })}>⠿</button>
+                                <button className="builder-add-block" onClick={() => addBlockSegment(block.id)} aria-label={`Add ${block.name} to prompt`}>
+                                    <span className="builder-block-heading"><span>{block.name}</span>{blockUsageCounts[block.id] ? <span className="builder-count" aria-label={`Used ${blockUsageCounts[block.id]} times`}>{blockUsageCounts[block.id]}</span> : null}</span>
+                                    <span className="builder-block-excerpt" title={block.content}>{block.content}</span>
+                                </button>
+                                <div className="builder-block-actions">
+                                    <button className="btn-icon" aria-label={`Copy ${block.name}`} title="Copy content" onClick={() => void handleCopy(block.content, block.id)}>{copiedBlockId === block.id ? '✓' : '📋'}</button>
+                                    <button className="btn-icon" aria-label={`Edit ${block.name}`} title="Edit block" onClick={() => startEditingBlock(block)}>✎</button>
+                                </div>
+                            </div>
+                        ))}
+                        {filteredBlocks.length === 0 && <p className="builder-hint">{blocks.length === 0 ? 'No blocks yet. Create one in Blocks, or select text in your prompt.' : 'No matching blocks. Try another search or color.'}</p>}
+                    </div>
                 </div>
-            </div>
+            </aside>
 
-            {/* Main Area */}
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '1.5rem', overflowY: 'auto', paddingRight: '1rem' }}>
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+            <section className="builder-main" aria-label="Prompt editor">
+                <div className="builder-toolbar">
                     <h2>Construct Prompt</h2>
-                    <div style={{ display: 'flex', gap: '0.5rem' }}>
+                    <div className="builder-actions">
                         <button onClick={addTextSegment} className="btn btn-secondary">+ Text</button>
                         <button onClick={addNewlineSegment} className="btn btn-secondary" title="Force a new line">↵ Newline</button>
+                        <button onClick={handleClearDraft} disabled={!hasDraft} className="btn btn-secondary">Clear Draft</button>
                     </div>
                 </div>
-
-                {/* Segments Input Area */}
-                <div
-                    className="card"
-                    onDragOver={(e) => handleDragOver(e, segments.length)} // Default drop at end
-                    onDrop={(e) => handleDrop(e, segments.length)}
-                    style={{
-                        padding: '1.5rem',
-                        border: '1px solid var(--border)',
-                        minHeight: '120px',
-                        display: 'flex',
-                        flexWrap: 'wrap',
-                        alignContent: 'flex-start',
-                        gap: '0.5rem',
-                        position: 'relative',
-                        background: isDragging ? '#f0f9ff' : 'white',
-                        transition: 'background 0.2s'
-                    }}>
-                    {segments.length === 0 && (
-                        <div style={{ color: 'var(--text-muted)', width: '100%', userSelect: 'none', pointerEvents: 'none' }}>
-                            Drag blocks here or click "Add Custom Text"...
-                        </div>
-                    )}
-
-                    {segments.map((seg: any, index: number) => (
-                        <div
-                            key={index}
-                            draggable={seg.type !== 'text'} // Allow dragging newlines too
-                            onDragStart={(e) => {
-                                if (seg.type !== 'text') {
-                                    handleSegmentDragStart(e, index);
-                                }
-                            }}
-                            onDragOver={(e) => {
-                                e.preventDefault();
-                                e.stopPropagation();
-                                const rect = e.currentTarget.getBoundingClientRect();
-                                const midpoint = rect.left + rect.width / 2;
-                                const dropPosition = e.clientX < midpoint ? index : index + 1;
-                                setDragOverIndex(dropPosition);
-                            }}
-                            onDrop={(e) => {
-                                e.preventDefault();
-                                e.stopPropagation();
-                                const rect = e.currentTarget.getBoundingClientRect();
-                                const midpoint = rect.left + rect.width / 2;
-                                const dropPosition = e.clientX < midpoint ? index : index + 1;
-                                handleDrop(e, dropPosition);
-                            }}
-                            style={{
-                                display: 'flex',
-                                alignItems: 'center',
-                                position: 'relative',
-                                cursor: 'grab',
-                                opacity: dragSourceIndex === index ? 0.5 : 1,
-                                paddingLeft: isDragging ? '8px' : '0',
-                                paddingRight: isDragging ? '8px' : '0',
-                                transition: 'padding 0.15s ease',
-                                width: seg.type === 'newline' ? '100%' : 'auto',
-                                height: seg.type === 'newline' ? '12px' : 'auto',
-                                margin: seg.type === 'newline' ? '4px 0' : '0'
-                            }}
-                        >
-                            {/* Drop Indicator - Left side */}
-                            {isDragging && dragOverIndex === index && (
-                                <div style={{
-                                    position: 'absolute',
-                                    left: 0,
-                                    top: '50%',
-                                    transform: 'translateY(-50%)',
-                                    width: '3px',
-                                    height: '28px',
-                                    background: 'var(--primary)',
-                                    borderRadius: '2px',
-                                    boxShadow: '0 0 6px var(--primary)'
-                                }} />
-                            )}
-
-                            {/* The Segment Itself */}
-                            {seg.type === 'block' ? (() => {
-                                const block = blocks.find(b => b.id === seg.blockId);
-                                const blockColor = block?.color;
-                                return (
-                                    <span style={{
-                                        display: 'inline-flex',
-                                        alignItems: 'center',
-                                        background: blockColor ? `${blockColor}20` : '#e0e7ff',
-                                        color: blockColor || '#4338ca',
-                                        padding: '4px 12px',
-                                        borderRadius: '999px',
-                                        fontSize: '0.9rem',
-                                        fontWeight: 500,
-                                        border: `1px solid ${blockColor ? `${blockColor}40` : '#c7d2fe'}`,
-                                        userSelect: 'none',
-                                        animation: 'fadeIn 0.2s ease-out'
-                                    }} title={block?.content}>
-                                        {block?.name || 'Unknown'}
-                                        <button
-                                            onClick={() => removeSegment(index)}
-                                            style={{
-                                                marginLeft: '6px',
-                                                border: 'none',
-                                                background: 'transparent',
-                                                color: 'currentColor',
-                                                cursor: 'pointer',
-                                                fontSize: '1em',
-                                                lineHeight: 1,
-                                                padding: 0,
-                                                opacity: 0.6
-                                            }}
-                                            onMouseEnter={(e) => e.currentTarget.style.opacity = '1'}
-                                            onMouseLeave={(e) => e.currentTarget.style.opacity = '0.6'}
-                                        >
-                                            ×
-                                        </button>
-                                    </span>
-                                );
-                            })() : seg.type === 'newline' ? (
-                                <div style={{
-                                    display: 'flex',
-                                    alignItems: 'center',
-                                    gap: '0.5rem',
-                                    color: '#94a3b8',
-                                    fontSize: '0.75rem',
-                                    fontWeight: 600,
-                                    userSelect: 'none',
-                                    width: '100%',
-                                    borderBottom: '1px dashed #e2e8f0',
-                                    padding: '4px 0'
-                                }}>
-                                    <span style={{ background: '#f1f5f9', padding: '1px 6px', borderRadius: '4px' }}>↵ LINE BREAK</span>
-                                    <button
-                                        onClick={() => removeSegment(index)}
-                                        style={{ border: 'none', background: 'transparent', cursor: 'pointer', opacity: 0.5 }}
-                                    >
-                                        ×
-                                    </button>
-                                </div>
-                            ) : (
-                                <div style={{ display: 'flex', alignItems: 'center', position: 'relative' }}>
-                                    {/* Drag Handle for text segments */}
-                                    <div
-                                        draggable
-                                        onDragStart={(e) => {
-                                            e.stopPropagation();
-                                            handleSegmentDragStart(e, index);
-                                        }}
-                                        style={{
-                                            cursor: 'grab',
-                                            padding: '4px 4px 4px 0',
-                                            color: '#94a3b8',
-                                            fontSize: '0.8rem',
-                                            userSelect: 'none',
-                                            display: 'flex',
-                                            alignItems: 'center'
-                                        }}
-                                        title="Drag to reorder"
-                                    >
-                                        ⋮⋮
-                                    </div>
-                                    <div style={{
-                                        display: 'inline-grid',
-                                        verticalAlign: 'middle',
-                                        alignItems: 'center',
-                                        maxWidth: '100%',
-                                        minWidth: '50px'
-                                    }}>
-                                        <div style={{
-                                            gridArea: '1/1',
-                                            whiteSpace: 'pre-wrap',
-                                            wordBreak: 'break-word',
-                                            padding: '4px 8px',
-                                            fontSize: '0.9rem',
-                                            fontFamily: 'inherit',
-                                            lineHeight: '1.4',
-                                            visibility: 'hidden',
-                                            pointerEvents: 'none'
-                                        }}>
-                                            {seg.content + ' '}
+                <p className="builder-status" role="status" aria-live="polite">{status}</p>
+                {segments.length > 0 && <p className="builder-hint" id="builder-drag-help">Hold ⠿ and drag to reorder. You can also use ↑ ↓.</p>}
+                <div ref={segmentsElement} className={`card builder-segments ${dragging ? 'is-dragging' : ''} ${activeDrag?.target !== null && activeDrag ? 'is-valid-drop' : ''}`} onDragOver={event => { event.preventDefault(); setDragOverIndex(segments.length); }} onDrop={event => handleDrop(event, segments.length)}>
+                    {segments.length === 0 && <p className="builder-hint">Tap “+ Text” to start, or open Available Blocks and tap a block to add it.</p>}
+                    {segments.map((segment, index) => (
+                        <div key={index} data-builder-index={index} className={`builder-segment builder-segment-${segment.type} ${activeSourceIndex === index ? 'is-drag-source' : ''} ${dragging && activeDropIndex === index ? 'is-drop-before' : ''} ${dragging && activeDropIndex === index + 1 ? 'is-drop-after' : ''}`}
+                            draggable={segment.type !== 'text'} onDragStart={event => { if (segment.type !== 'text') handleSegmentDragStart(event, index); }}
+                            onDragOver={event => { event.preventDefault(); event.stopPropagation(); setDragOverIndex(getDropPosition(event, index)); }}
+                            onDrop={event => { event.preventDefault(); event.stopPropagation(); handleDrop(event, getDropPosition(event, index)); }}>
+                            <div className="builder-segment-content">
+                                {segment.type === 'block' ? (() => {
+                                    const block = blocks.find(item => item.id === segment.blockId);
+                                    return <span className="builder-block-chip" title={block?.content} style={{ background: block?.color ? `${block.color}20` : undefined, color: block?.color, borderColor: block?.color ? `${block.color}40` : undefined }}>{block?.name || 'Unknown block'}</span>;
+                                })() : segment.type === 'newline' ? <span className="builder-newline">↵ LINE BREAK</span> : (
+                                    <div className="builder-text-editor">
+                                        <div className="builder-text-sizer">
+                                            <span className="builder-text-mirror" aria-hidden="true">{segment.content + ' '}</span>
+                                            <textarea aria-label={`Prompt text ${index + 1}`} value={segment.content} placeholder="Write prompt text..." rows={1} onChange={event => updateTextSegment(index, event.target.value)} onSelect={event => handleTextSelect(index, event)} onPointerUp={event => handleTextSelect(index, event)} onKeyUp={event => handleTextSelect(index, event)} autoFocus={!segment.content} />
                                         </div>
-                                        <textarea
-                                            value={seg.content}
-                                            onChange={(e) => updateTextSegment(index, e.target.value)}
-                                            onSelect={(e) => handleTextSelect(index, e)}
-                                            placeholder="text..."
-                                            rows={1}
-                                            style={{
-                                                gridArea: '1/1',
-                                                border: 'none',
-                                                borderBottom: '2px solid #cbd5e1',
-                                                outline: 'none',
-                                                padding: '4px 8px',
-                                                fontSize: '0.9rem',
-                                                background: 'transparent',
-                                                color: 'var(--text-main)',
-                                                resize: 'none',
-                                                overflow: 'hidden',
-                                                width: '100%',
-                                                height: '100%',
-                                                minWidth: '0',
-                                                fontFamily: 'inherit',
-                                                lineHeight: '1.4',
-                                                whiteSpace: 'pre-wrap',
-                                                wordBreak: 'break-word',
-                                                boxSizing: 'border-box'
-                                            }}
-                                            onFocus={(e) => e.target.style.borderColor = 'var(--primary)'}
-                                            onBlur={(e) => {
-                                                e.target.style.borderColor = '#cbd5e1';
-                                                setTimeout(() => setSelection(null), 200);
-                                            }}
-                                            autoFocus={!seg.content}
-                                        />
                                     </div>
-                                    {selection && selection.index === index && (
-                                        <button
-                                            onMouseDown={(e) => {
-                                                e.preventDefault();
-                                                createBlockFromSelection();
-                                            }}
-                                            style={{
-                                                position: 'absolute',
-                                                top: '-30px',
-                                                left: '0',
-                                                background: 'var(--primary)',
-                                                color: 'white',
-                                                border: 'none',
-                                                borderRadius: '4px',
-                                                padding: '4px 8px',
-                                                fontSize: '0.75rem',
-                                                cursor: 'pointer',
-                                                zIndex: 100,
-                                                whiteSpace: 'nowrap'
-                                            }}
-                                        >
-                                            + Create Block
-                                        </button>
-                                    )}
-                                    <button
-                                        onClick={() => removeSegment(index)}
-                                        style={{
-                                            background: '#f1f5f9',
-                                            color: '#94a3b8',
-                                            cursor: 'pointer',
-                                            fontSize: '0.8rem',
-                                            borderRadius: '50%',
-                                            width: '16px',
-                                            height: '16px',
-                                            display: 'flex',
-                                            alignItems: 'center',
-                                            justifyContent: 'center',
-                                            marginLeft: '4px'
-                                        }}
-                                        title="Remove text"
-                                    >
-                                        ×
-                                    </button>
-                                </div>
-                            )}
-
-                            {/* Drop Indicator - Right side (for dropping after this segment) */}
-                            {isDragging && dragOverIndex === index + 1 && (
-                                <div style={{
-                                    position: 'absolute',
-                                    right: 0,
-                                    top: '50%',
-                                    transform: 'translateY(-50%)',
-                                    width: '3px',
-                                    height: '28px',
-                                    background: 'var(--primary)',
-                                    borderRadius: '2px',
-                                    boxShadow: '0 0 6px var(--primary)'
-                                }} />
+                                )}
+                            </div>
+                            <div className="builder-segment-controls" role="group" aria-label={`Item ${index + 1} controls`}>
+                                <button type="button" className="btn-icon pointer-drag-handle" aria-label={`Drag item ${index + 1} to reorder`} aria-describedby="builder-drag-help" draggable={false} {...pointerDrag.getHandleProps({ kind: 'segment', index })}>⠿</button>
+                                <button className="btn-icon" onClick={() => moveSegment(index, -1)} disabled={index === 0} aria-label={`Move item ${index + 1} up`} title="Move earlier">↑</button>
+                                <button className="btn-icon" onClick={() => moveSegment(index, 1)} disabled={index === segments.length - 1} aria-label={`Move item ${index + 1} down`} title="Move later">↓</button>
+                                <button className="btn-icon builder-remove-segment" onClick={() => removeSegment(index)} aria-label={`Remove item ${index + 1}`} title="Remove item">×</button>
+                            </div>
+                            {selection?.index === index && segment.type === 'text' && (
+                                <div className="builder-selection-action"><button className="btn btn-primary" onClick={createBlockFromSelection}>+ Create Block from Selection</button></div>
                             )}
                         </div>
                     ))}
                 </div>
 
-                <div className="card" style={{ padding: '1.5rem', background: '#f8fafc' }}>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem', borderBottom: '1px solid #e2e8f0', paddingBottom: '0.75rem' }}>
-                        <h3 className="text-sm text-muted" style={{ margin: 0, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em' }}>Real-time Preview</h3>
-
-                        <div style={{ display: 'flex', alignItems: 'center', gap: '1rem' }}>
-                            <div className="text-muted" style={{ fontSize: '0.75rem', fontWeight: 600 }}>
-                                {wordCount} words • {charCount} characters
-                            </div>
-
-                            <div style={{ display: 'flex', gap: '0.5rem', background: 'white', padding: '0.2rem', borderRadius: '6px', border: '1px solid #e2e8f0' }}>
-                                <button
-                                    onClick={handleSave}
-                                    disabled={segments.length === 0}
-                                    style={{
-                                        background: 'transparent',
-                                        border: 'none',
-                                        cursor: 'pointer',
-                                        fontSize: '1.1rem',
-                                        padding: '0.2rem 0.4rem',
-                                        borderRadius: '4px',
-                                        transition: 'all 0.2s',
-                                        opacity: segments.length === 0 ? 0.3 : 1
-                                    }}
-                                    className="hover-trigger"
-                                    title="Quick Save to Library"
-                                >
-                                    💾
-                                </button>
-                                <button
-                                    onClick={() => {
-                                        navigator.clipboard.writeText(preview);
-                                        setCopied(true);
-                                        setTimeout(() => setCopied(false), 1500);
-                                    }}
-                                    style={{
-                                        background: 'transparent',
-                                        border: 'none',
-                                        cursor: 'pointer',
-                                        fontSize: '1.1rem',
-                                        color: copied ? 'var(--success)' : 'inherit',
-                                        padding: '0.2rem 0.4rem',
-                                        borderRadius: '4px',
-                                        transition: 'all 0.2s'
-                                    }}
-                                    className="hover-trigger"
-                                    title="Copy to clipboard"
-                                >
-                                    {copied ? '✓' : '📋'}
-                                </button>
+                <section className="card builder-preview" aria-labelledby="builder-preview-title">
+                    <div className="builder-preview-header">
+                        <h3 id="builder-preview-title">Real-time Preview</h3>
+                        <div className="builder-preview-tools">
+                            <span className="builder-hint">{wordCount} words • {preview.length} characters</span>
+                            <div className="builder-actions">
+                                <button onClick={() => handleSave()} disabled={segments.length === 0} className="btn btn-secondary" title="Quick Save to Library">💾 Save</button>
+                                <button onClick={() => void handleCopy(preview)} disabled={!preview} className="btn btn-secondary">{copied ? '✓ Copied' : '📋 Copy'}</button>
                             </div>
                         </div>
                     </div>
-                    <div style={{
-                        whiteSpace: 'pre-wrap',
-                        fontFamily: 'monospace',
-                        fontSize: '0.9rem',
-                        color: 'var(--text-main)',
-                        lineHeight: '1.6'
-                    }}>
-                        {preview}
-                    </div>
-                </div>
+                    <div className="builder-preview-text">{preview || <span className="builder-hint">Your assembled prompt will appear here.</span>}</div>
+                </section>
 
-                <div className="card" style={{ padding: '1.5rem', display: 'flex', flexDirection: 'column', gap: '1.5rem' }}>
-                    <h3 className="mb-4">Save Configuration</h3>
-                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 120px', gap: '1rem' }}>
-                        <div>
-                            <label>Title</label>
-                            <input value={title} onChange={e => updateState({ title: e.target.value })} placeholder="Prompt Title" />
-                        </div>
-                        <div>
-                            <label>Rating</label>
-                            <input type="number" min="0" max="100" value={rating} onChange={e => updateState({ rating: Number(e.target.value) })} />
-                        </div>
+                <section className="card builder-save" aria-labelledby="builder-save-title">
+                    <h3 id="builder-save-title">Save Configuration</h3>
+                    <div className="builder-save-fields">
+                        <div><label htmlFor="builder-title">Title</label><input id="builder-title" value={title} onChange={event => updateState({ title: event.target.value })} placeholder="Prompt Title" /></div>
+                        <div><label htmlFor="builder-rating">Rating</label><input id="builder-rating" type="number" min="0" max="100" inputMode="numeric" value={rating} onChange={event => updateState({ rating: Math.max(0, Math.min(100, Number(event.target.value) || 0)) })} /></div>
                     </div>
-                    <div>
-                        <label>Notes</label>
-                        <textarea value={notes} onChange={e => updateState({ notes: e.target.value })} rows={2} />
+                    <div><label htmlFor="builder-notes">Notes</label><textarea id="builder-notes" value={notes} onChange={event => updateState({ notes: event.target.value })} rows={2} /></div>
+                    <div className="builder-save-actions">
+                        <div className="builder-folder-field"><label htmlFor="builder-folder">Save in folder</label><select id="builder-folder" value={folderId || ''} onChange={event => updateState({ folderId: event.target.value || undefined })}><option value="">No Folder (Root)</option>{folders.map(folder => <option key={folder.id} value={folder.id}>{folder.name}</option>)}</select></div>
+                        {editPromptId && <button onClick={handleCancel} className="btn btn-secondary">Cancel Edit</button>}
+                        <button onClick={() => handleSave()} disabled={segments.length === 0} className="btn btn-primary">{editPromptId ? 'Update Prompt' : 'Save To Library'}</button>
+                        {editPromptId && <button onClick={() => handleSave(true)} disabled={segments.length === 0} className="btn btn-secondary">Save As New</button>}
                     </div>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '1rem', justifyContent: 'flex-end', marginTop: '1rem' }}>
-                        <select
-                            value={folderId || ''}
-                            onChange={e => updateState({ folderId: e.target.value || undefined })}
-                            style={{ padding: '0.5rem', borderRadius: '4px', border: '1px solid var(--border)' }}
-                        >
-                            <option value="">No Folder (Root)</option>
-                            {folders.map((f: any) => (
-                                <option key={f.id} value={f.id}>{f.name}</option>
-                            ))}
-                        </select>
-                        {editPromptId && (
-                            <button onClick={handleCancel} className="btn btn-secondary">
-                                Cancel Edit
-                            </button>
-                        )}
-                        <button onClick={handleSave} disabled={segments.length === 0} className="btn btn-primary">
-                            {editPromptId ? 'Update Prompt' : 'Save To Library'}
-                        </button>
-                        {editPromptId && (
-                            <button onClick={handleSaveAs} disabled={segments.length === 0} className="btn btn-secondary">
-                                Save As New
-                            </button>
-                        )}
-                    </div>
-                </div>
-            </div>
+                </section>
+            </section>
         </div>
     );
 }

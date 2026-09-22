@@ -1,7 +1,25 @@
-import { useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { useStore } from '../store';
 import { PRESET_COLORS, PRESET_ICONS } from '../types';
-import type { Folder } from '../types';
+import type { Folder, Prompt, PromptSegment } from '../types';
+import { copyText } from '../utils/clipboard';
+import { usePointerDrag } from '../hooks/usePointerDrag';
+import './PromptLibrary.css';
+
+type LibraryDropTarget =
+    | { type: 'prompt'; id: string; side: 'before' | 'after'; axis: 'x' | 'y' }
+    | { type: 'folder'; id: string };
+
+function getPromptDropTarget(card: HTMLElement, x: number, y: number): LibraryDropTarget {
+    const rect = card.getBoundingClientRect();
+    const columns = card.parentElement ? getComputedStyle(card.parentElement).gridTemplateColumns.split(/\s+/).length : 1;
+    const axis = columns > 1 ? 'x' : 'y';
+    // In wrapped grids, a gap above/below a card means before/after that row.
+    const before = y < rect.top ? true : y > rect.bottom ? false
+        : axis === 'x' ? x < rect.left + rect.width / 2 : y < rect.top + rect.height / 2;
+    return { type: 'prompt', id: card.dataset.libraryPrompt!, side: before ? 'before' : 'after', axis };
+}
 
 export function PromptLibrary({ onEdit }: { onEdit: (id: string) => void }) {
     const { prompts, deletePrompt, folders, deleteFolder, savePrompt, addFolder, updateFolder, blocks, reorderPrompts, expandedIds, setExpandedIds, currentFolderId, setCurrentFolderId } = useStore();
@@ -14,20 +32,72 @@ export function PromptLibrary({ onEdit }: { onEdit: (id: string) => void }) {
     // DnD State for Prompts
     const [dragOverPromptId, setDragOverPromptId] = useState<string | null>(null);
     const [dropSide, setDropSide] = useState<'before' | 'after' | null>(null);
+    const [dropAxis, setDropAxis] = useState<'x' | 'y'>('y');
+    const [dragOverFolderId, setDragOverFolderId] = useState<string | null>(null);
     const [isDraggingPrompt, setIsDraggingPrompt] = useState(false);
+    const [moveFeedback, setMoveFeedback] = useState('');
+    const libraryRef = useRef<HTMLDivElement>(null);
 
     // Folder edit modal state
     const [editingFolder, setEditingFolder] = useState<Folder | null>(null);
+    const [creatingFolder, setCreatingFolder] = useState(false);
     const [editFolderName, setEditFolderName] = useState('');
     const [editFolderIcon, setEditFolderIcon] = useState('📁');
     const [editFolderColor, setEditFolderColor] = useState<string | undefined>(undefined);
 
     // Copy feedback state
     const [copiedId, setCopiedId] = useState<string | null>(null);
+    const [copyFeedback, setCopyFeedback] = useState('');
+    const [feedbackPromptId, setFeedbackPromptId] = useState<string | null>(null);
+    const copyTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+    const folderDialog = useRef<HTMLFormElement>(null);
+    const isFolderDialogOpen = creatingFolder || editingFolder !== null;
+    const closeFolderDialog = useCallback(() => {
+        setEditingFolder(null);
+        setCreatingFolder(false);
+    }, []);
+
+    useEffect(() => () => {
+        if (copyTimer.current) clearTimeout(copyTimer.current);
+    }, []);
+
+    useEffect(() => {
+        if (!isFolderDialogOpen) return;
+        const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+        const previousOverflow = document.body.style.overflow;
+        document.body.style.overflow = 'hidden';
+        folderDialog.current?.querySelector<HTMLInputElement>('input')?.focus();
+
+        const handleKeyDown = (event: KeyboardEvent) => {
+            if (event.key === 'Escape') {
+                event.preventDefault();
+                closeFolderDialog();
+                return;
+            }
+            if (event.key !== 'Tab') return;
+            const controls = folderDialog.current?.querySelectorAll<HTMLElement>('button:not([disabled]), input:not([disabled]), select:not([disabled]), [tabindex="0"]');
+            if (!controls?.length) return;
+            const first = controls[0];
+            const last = controls[controls.length - 1];
+            if (event.shiftKey && (document.activeElement === first || !folderDialog.current?.contains(document.activeElement))) {
+                event.preventDefault();
+                last.focus();
+            } else if (!event.shiftKey && (document.activeElement === last || !folderDialog.current?.contains(document.activeElement))) {
+                event.preventDefault();
+                first.focus();
+            }
+        };
+        document.addEventListener('keydown', handleKeyDown);
+        return () => {
+            document.body.style.overflow = previousOverflow;
+            document.removeEventListener('keydown', handleKeyDown);
+            if (previousFocus?.isConnected) previousFocus.focus();
+        };
+    }, [isFolderDialogOpen, closeFolderDialog]);
 
 
 
-    const getFullContent = (segments: any[]) => {
+    const getFullContent = (segments: PromptSegment[]) => {
         let result = "";
         segments.forEach((seg, i) => {
             let content = "";
@@ -47,7 +117,7 @@ export function PromptLibrary({ onEdit }: { onEdit: (id: string) => void }) {
         return text.trim().split(/\s+/).filter(w => w.length > 0).length;
     };
 
-    const getCompositionSummary = (segments: any[]) => {
+    const getCompositionSummary = (segments: PromptSegment[]) => {
         const text = getFullContent(segments);
         const words = getWordCount(text);
         const chars = text.length;
@@ -55,17 +125,26 @@ export function PromptLibrary({ onEdit }: { onEdit: (id: string) => void }) {
         return `${blockCount} blocks • ${words} words • ${chars} chars`;
     };
 
-    const copyToClipboard = (text: string, promptId: string) => {
-        navigator.clipboard.writeText(text);
-        setCopiedId(promptId);
-        setTimeout(() => setCopiedId(null), 1500);
+    const copyToClipboard = async (text: string, promptId: string) => {
+        if (copyTimer.current) clearTimeout(copyTimer.current);
+        setCopiedId(null);
+        setFeedbackPromptId(promptId);
+        setCopyFeedback('Copying prompt…');
+        try {
+            await copyText(text);
+            setCopiedId(promptId);
+            setCopyFeedback('Prompt copied.');
+            copyTimer.current = setTimeout(() => setCopiedId(null), 1500);
+        } catch {
+            setCopyFeedback('Could not copy. Open Details to select and copy the prompt manually.');
+        }
     };
 
     // Sort folders by position
     const sortedFolders = [...folders].sort((a, b) => (a.position ?? 0) - (b.position ?? 0));
 
     // Filter AND Sort prompts
-    const filteredFolders = sortedFolders.filter(f => {
+    const filteredFolders = currentFolderId ? [] : sortedFolders.filter(f => {
         return f.name.toLowerCase().includes(searchTerm.toLowerCase());
     });
 
@@ -78,7 +157,7 @@ export function PromptLibrary({ onEdit }: { onEdit: (id: string) => void }) {
 
             // In root view, if searching, show all matches. Otherwise show root prompts.
             // When inside a folder, show folder prompts.
-            if (searchTerm) return matchesSearch;
+            if (searchTerm) return matchesSearch && (!currentFolderId || sameFolder);
             return sameFolder;
         })
         .sort((a, b) => {
@@ -90,13 +169,23 @@ export function PromptLibrary({ onEdit }: { onEdit: (id: string) => void }) {
             return 0;
         });
 
-    const movePrompt = (prompt: any, targetFolderId: string | undefined) => {
+    const movePrompt = (prompt: Prompt, targetFolderId: string | undefined) => {
+        if (prompt.folderId === targetFolderId) return;
         savePrompt({ ...prompt, folderId: targetFolderId });
+        const destination = folders.find(folder => folder.id === targetFolderId)?.name || 'root';
+        setMoveFeedback(`Moved ${prompt.title} to ${destination}.`);
     };
 
-    const handleDropOnFolder = (e: React.DragEvent, folderId: string) => {
+    const resetNativeDrag = () => {
+        setIsDraggingPrompt(false);
+        setDragOverPromptId(null);
+        setDropSide(null);
+        setDragOverFolderId(null);
+    };
+
+    const handleDropOnFolder = (e: React.DragEvent, folderId: string | undefined) => {
         e.preventDefault();
-        (e.currentTarget as HTMLElement).style.background = '';
+        resetNativeDrag();
         const promptId = e.dataTransfer.getData('promptId');
         if (promptId) {
             const prompt = prompts.find(p => p.id === promptId);
@@ -104,71 +193,152 @@ export function PromptLibrary({ onEdit }: { onEdit: (id: string) => void }) {
         }
     };
 
+    const reorderPrompt = (draggedId: string, targetId: string, side: 'before' | 'after') => {
+        if (sortBy !== 'custom' || draggedId === targetId) return;
+        // Use the displayed manual order, keeping prompts outside this view in their slots.
+        const visibleIds = new Set(filteredPrompts.map(prompt => prompt.id));
+        if (!visibleIds.has(draggedId) || !visibleIds.has(targetId)) return;
+        const ordered = [...prompts].sort((a, b) => (a.position ?? 0) - (b.position ?? 0));
+        const visible = ordered.filter(prompt => visibleIds.has(prompt.id));
+        const fromIndex = visible.findIndex(prompt => prompt.id === draggedId);
+        const [draggedPrompt] = visible.splice(fromIndex, 1);
+        const targetIndex = visible.findIndex(prompt => prompt.id === targetId);
+        const newIndex = targetIndex + (side === 'after' ? 1 : 0);
+        visible.splice(newIndex, 0, draggedPrompt);
+        if (fromIndex === newIndex) return;
+        let nextVisible = 0;
+        reorderPrompts(ordered.map((prompt, position) => ({
+            ...(visibleIds.has(prompt.id) ? visible[nextVisible++] : prompt), position
+        })));
+        setMoveFeedback(`Moved ${draggedPrompt.title} to position ${newIndex + 1} of ${visible.length}.`);
+    };
+
+    const pointerDrag = usePointerDrag<string, LibraryDropTarget>({
+        getLabel: id => prompts.find(prompt => prompt.id === id)?.title || 'Prompt',
+        getTarget: (x, y, sourceId) => {
+            const element = document.elementFromPoint(x, y);
+            if (!element || !libraryRef.current?.contains(element)) return null;
+            const folder = element.closest<HTMLElement>('[data-library-folder]');
+            if (folder) {
+                const folderId = folder.dataset.libraryFolder!;
+                const source = prompts.find(prompt => prompt.id === sourceId);
+                return source && (source.folderId || '') !== folderId ? { type: 'folder', id: folderId } : null;
+            }
+            if (sortBy !== 'custom') return null;
+            const card = element.closest<HTMLElement>('[data-library-prompt]');
+            if (card) return card.dataset.libraryPrompt !== sourceId ? getPromptDropTarget(card, x, y) : null;
+
+            // Accept the gaps between cards as insertion targets as well.
+            const grid = element.closest<HTMLElement>('.library-prompt-grid');
+            if (!grid) return null;
+            let closestCard: HTMLElement | null = null;
+            let closestDistance = Infinity;
+            for (const candidate of grid.querySelectorAll<HTMLElement>('[data-library-prompt]')) {
+                if (candidate.dataset.libraryPrompt === sourceId) continue;
+                const rect = candidate.getBoundingClientRect();
+                const dx = Math.max(rect.left - x, 0, x - rect.right);
+                const dy = Math.max(rect.top - y, 0, y - rect.bottom);
+                const distance = dx * dx + dy * dy;
+                if (distance < closestDistance) {
+                    closestCard = candidate;
+                    closestDistance = distance;
+                }
+            }
+            return closestCard ? getPromptDropTarget(closestCard, x, y) : null;
+        },
+        onDrop: (sourceId, target) => {
+            if (target.type === 'prompt') reorderPrompt(sourceId, target.id, target.side);
+            else {
+                const prompt = prompts.find(item => item.id === sourceId);
+                if (prompt && (!target.id || folders.some(folder => folder.id === target.id))) movePrompt(prompt, target.id || undefined);
+            }
+        }
+    });
+    const pointerTarget = pointerDrag.drag?.target;
+    const activePromptId = pointerTarget?.type === 'prompt' ? pointerTarget.id : dragOverPromptId;
+    const activeDropSide = pointerTarget?.type === 'prompt' ? pointerTarget.side : dropSide;
+    const activeDropAxis = pointerTarget?.type === 'prompt' ? pointerTarget.axis : dropAxis;
+    const activeFolderId = pointerTarget?.type === 'folder' ? pointerTarget.id : dragOverFolderId;
+    const dragging = isDraggingPrompt || pointerDrag.drag !== null;
+    const dragInstructions = sortBy === 'custom'
+        ? 'Drag the grip to reorder prompts or move them onto a folder.'
+        : 'Drag the grip onto a folder to move a prompt. Choose Manual sort to reorder.';
+    const pointerDropLabel = pointerTarget?.type === 'prompt'
+        ? `Place ${pointerTarget.side} ${prompts.find(prompt => prompt.id === pointerTarget.id)?.title || 'prompt'}`
+        : pointerTarget?.type === 'folder'
+            ? `Move to ${folders.find(folder => folder.id === pointerTarget.id)?.name || 'root'}`
+            : 'Move over a destination';
+
     const handlePromptDragStart = (e: React.DragEvent, promptId: string) => {
+        if (pointerDrag.drag) {
+            e.preventDefault();
+            return;
+        }
         e.dataTransfer.setData('promptId', promptId);
         e.dataTransfer.effectAllowed = 'move';
         setIsDraggingPrompt(true);
     };
 
     const handlePromptDragOver = (e: React.DragEvent, targetId: string) => {
+        if (!isDraggingPrompt) return;
         e.preventDefault();
         if (sortBy !== 'custom') return;
-
-        const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
-        const midpoint = rect.left + rect.width / 2;
-        const side = e.clientX < midpoint ? 'before' : 'after';
-
+        const target = getPromptDropTarget(e.currentTarget as HTMLElement, e.clientX, e.clientY);
+        if (target.type !== 'prompt') return;
         setDragOverPromptId(targetId);
-        setDropSide(side);
+        setDropSide(target.side);
+        setDropAxis(target.axis);
+        setDragOverFolderId(null);
     };
 
     const handlePromptDrop = (e: React.DragEvent, targetId: string) => {
         e.preventDefault();
-        setIsDraggingPrompt(false);
-        setDragOverPromptId(null);
-        setDropSide(null);
-
-        if (sortBy !== 'custom') return;
-
+        resetNativeDrag();
         const draggedId = e.dataTransfer.getData('promptId');
-        if (!draggedId || draggedId === targetId) return;
-
-        const currentPrompts = [...prompts];
-        const draggedIdx = currentPrompts.findIndex(p => p.id === draggedId);
-        const targetIdx = currentPrompts.findIndex(p => p.id === targetId);
-
-        if (draggedIdx === -1 || targetIdx === -1) return;
-
-        const [draggedPrompt] = currentPrompts.splice(draggedIdx, 1);
-
-        // Calculate new index
-        let newIdx = currentPrompts.findIndex(p => p.id === targetId);
-        if (dropSide === 'after') newIdx += 1;
-
-        currentPrompts.splice(newIdx, 0, draggedPrompt);
-
-        // Re-assign positions for all prompts in this context (folder or root)
-        const updatedPrompts = currentPrompts.map((p, i) => ({ ...p, position: i }));
-        reorderPrompts(updatedPrompts);
+        const target = getPromptDropTarget(e.currentTarget as HTMLElement, e.clientX, e.clientY);
+        if (draggedId && target.type === 'prompt') reorderPrompt(draggedId, targetId, target.side);
     };
 
 
+    const openFolder = (folderId: string) => {
+        setCurrentFolderId(folderId);
+        setSearchTerm('');
+    };
+
+    const movePromptBy = (promptId: string, direction: -1 | 1) => {
+        const index = filteredPrompts.findIndex(prompt => prompt.id === promptId);
+        const other = filteredPrompts[index + direction];
+        if (!other) return;
+        reorderPrompt(promptId, other.id, direction === -1 ? 'before' : 'after');
+    };
+
+    const openCreateFolder = () => {
+        setEditingFolder(null);
+        setCreatingFolder(true);
+        setEditFolderName('');
+        setEditFolderIcon('📁');
+        setEditFolderColor(undefined);
+    };
+
     const openEditFolder = (folder: Folder) => {
+        setCreatingFolder(false);
         setEditingFolder(folder);
         setEditFolderName(folder.name);
         setEditFolderIcon(folder.icon || '📁');
         setEditFolderColor(folder.color);
     };
 
-    const saveEditFolder = () => {
-        if (editingFolder && editFolderName.trim()) {
-            updateFolder(editingFolder.id, {
-                name: editFolderName.trim(),
-                icon: editFolderIcon,
-                color: editFolderColor
-            });
-            setEditingFolder(null);
+    const saveFolder = () => {
+        const name = editFolderName.trim();
+        if (!name) return;
+        if (creatingFolder) {
+            addFolder(name, editFolderIcon, editFolderColor);
+            setCurrentFolderId(null);
+            setSearchTerm('');
+        } else if (editingFolder) {
+            updateFolder(editingFolder.id, { name, icon: editFolderIcon, color: editFolderColor });
         }
+        closeFolderDialog();
     };
 
     const moveFolderUp = (folder: Folder) => {
@@ -192,13 +362,12 @@ export function PromptLibrary({ onEdit }: { onEdit: (id: string) => void }) {
     const toggleAllDetails = () => {
         // If all currently filtered prompts are open, close them. Otherwise open them.
         const allVisibleIds = filteredPrompts.map(p => p.id);
-        const allOpen = allVisibleIds.every(id => expandedIds.has(id));
-
-        if (allOpen) {
-            setExpandedIds(new Set());
-        } else {
-            setExpandedIds(new Set(allVisibleIds));
-        }
+        setExpandedIds(previous => {
+            const allOpen = allVisibleIds.every(id => previous.has(id));
+            const next = new Set(previous);
+            allVisibleIds.forEach(id => allOpen ? next.delete(id) : next.add(id));
+            return next;
+        });
     };
 
     const handleApplySortToCustom = () => {
@@ -220,32 +389,41 @@ export function PromptLibrary({ onEdit }: { onEdit: (id: string) => void }) {
     };
 
     return (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: '1.5rem', maxWidth: '1200px', margin: '0 auto' }}>
-            {/* Edit Folder Modal */}
-            {editingFolder && (
-                <div style={{
-                    position: 'fixed',
-                    inset: 0,
-                    background: 'rgba(0,0,0,0.5)',
-                    display: 'flex',
-                    alignItems: 'center',
-                    justifyContent: 'center',
-                    zIndex: 1000
-                }} onClick={() => setEditingFolder(null)}>
-                    <div
-                        className="card"
-                        style={{ padding: '1.5rem', minWidth: '320px', maxWidth: '400px' }}
+        <div className="prompt-library" ref={libraryRef}>
+            {pointerDrag.drag && createPortal(
+                <div
+                    className="library-drag-preview"
+                    aria-hidden="true"
+                    style={{ left: Math.min(Math.max(12, pointerDrag.drag.x - 100), window.innerWidth - 212), top: Math.max(12, pointerDrag.drag.y - 84) }}
+                >
+                    <strong>{pointerDrag.drag.label}</strong>
+                    <span>{pointerDropLabel}</span>
+                </div>, document.body
+            )}
+            {/* Create/Edit Folder Modal */}
+            {isFolderDialogOpen && createPortal(
+                <div className="library-modal-backdrop" onClick={closeFolderDialog}>
+                    <form
+                        onSubmit={event => { event.preventDefault(); saveFolder(); }}
+                        ref={folderDialog}
+                        className="card library-folder-dialog"
+                        role="dialog"
+                        aria-modal="true"
+                        aria-labelledby="library-folder-dialog-title"
                         onClick={e => e.stopPropagation()}
                     >
-                        <h3 style={{ marginBottom: '1rem' }}>Edit Folder</h3>
+                        <div className="library-dialog-heading">
+                            <h3 id="library-folder-dialog-title">{creatingFolder ? 'New Folder' : 'Edit Folder'}</h3>
+                            <button type="button" className="btn-icon" aria-label="Close folder editor" onClick={closeFolderDialog}>×</button>
+                        </div>
 
                         <div style={{ marginBottom: '1rem' }}>
-                            <label style={{ display: 'block', marginBottom: '0.25rem', fontSize: '0.85rem' }}>Name</label>
+                            <label htmlFor="library-folder-name" style={{ display: 'block', marginBottom: '0.25rem', fontSize: '0.85rem' }}>Name</label>
                             <input
+                                id="library-folder-name"
                                 value={editFolderName}
                                 onChange={e => setEditFolderName(e.target.value)}
                                 style={{ width: '100%' }}
-                                autoFocus
                             />
                         </div>
 
@@ -255,7 +433,10 @@ export function PromptLibrary({ onEdit }: { onEdit: (id: string) => void }) {
                                 {PRESET_ICONS.map(icon => (
                                     <button
                                         key={icon}
+                                        type="button"
                                         onClick={() => setEditFolderIcon(icon)}
+                                        aria-label={`Use ${icon} icon`}
+                                        aria-pressed={editFolderIcon === icon}
                                         style={{
                                             width: '36px',
                                             height: '36px',
@@ -276,6 +457,7 @@ export function PromptLibrary({ onEdit }: { onEdit: (id: string) => void }) {
                             <label style={{ display: 'block', marginBottom: '0.25rem', fontSize: '0.85rem' }}>Color</label>
                             <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.5rem' }}>
                                 <button
+                                    type="button"
                                     onClick={() => setEditFolderColor(undefined)}
                                     style={{
                                         width: '28px',
@@ -286,11 +468,16 @@ export function PromptLibrary({ onEdit }: { onEdit: (id: string) => void }) {
                                         cursor: 'pointer'
                                     }}
                                     title="No color"
+                                    aria-label="No folder color"
+                                    aria-pressed={!editFolderColor}
                                 />
                                 {PRESET_COLORS.map(color => (
                                     <button
                                         key={color}
+                                        type="button"
                                         onClick={() => setEditFolderColor(color)}
+                                        aria-label={`Use folder color ${color}`}
+                                        aria-pressed={editFolderColor === color}
                                         style={{
                                             width: '28px',
                                             height: '28px',
@@ -305,18 +492,33 @@ export function PromptLibrary({ onEdit }: { onEdit: (id: string) => void }) {
                         </div>
 
                         <div style={{ display: 'flex', gap: '0.5rem', justifyContent: 'flex-end' }}>
-                            <button className="btn btn-secondary" onClick={() => setEditingFolder(null)}>Cancel</button>
-                            <button className="btn btn-primary" onClick={saveEditFolder}>Save</button>
+                            <button type="button" className="btn btn-secondary" onClick={closeFolderDialog}>Cancel</button>
+                            <button type="submit" className="btn btn-primary" disabled={!editFolderName.trim()}>{creatingFolder ? 'Create Folder' : 'Save'}</button>
                         </div>
-                    </div>
-                </div>
+                    </form>
+                </div>,
+                document.body
             )}
 
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+            <div className="library-heading">
+                <div className="library-heading-title">
                     {currentFolderId ? (
                         <>
-                            <button onClick={() => setCurrentFolderId(null)} className="btn-icon">←</button>
+                            <button
+                                onClick={() => setCurrentFolderId(null)}
+                                className={`btn btn-secondary library-root-drop ${activeFolderId === '' ? 'is-drop-target' : ''}`}
+                                data-library-folder=""
+                                aria-label="Back to all folders. Drop a prompt here to move it to root."
+                                title="Drop a prompt here to move it to root"
+                                onDragOver={event => {
+                                    if (!isDraggingPrompt) return;
+                                    event.preventDefault();
+                                    setDragOverFolderId('');
+                                    setDragOverPromptId(null);
+                                }}
+                                onDragLeave={() => setDragOverFolderId(null)}
+                                onDrop={event => handleDropOnFolder(event, undefined)}
+                            >← All folders</button>
                             <span style={{ fontSize: '1.2rem' }}>{folders.find(f => f.id === currentFolderId)?.icon || '📁'}</span>
                             <h2 style={{ margin: 0 }}>{folders.find(f => f.id === currentFolderId)?.name}</h2>
                         </>
@@ -325,10 +527,11 @@ export function PromptLibrary({ onEdit }: { onEdit: (id: string) => void }) {
                     )}
                 </div>
 
-                <div style={{ display: 'flex', gap: '1rem', alignItems: 'center' }}>
+                <div className="library-toolbar">
                     <select
+                        aria-label="Sort prompts"
                         value={sortBy}
-                        onChange={(e) => setSortBy(e.target.value as any)}
+                        onChange={(e) => setSortBy(e.target.value as typeof sortBy)}
                         style={{ padding: '0.5rem', borderRadius: '4px', border: '1px solid var(--border)' }}
                     >
                         <option value="newest">Time: Newest First</option>
@@ -352,6 +555,7 @@ export function PromptLibrary({ onEdit }: { onEdit: (id: string) => void }) {
                     <button
                         className="btn btn-secondary"
                         onClick={toggleAllDetails}
+                        disabled={filteredPrompts.length === 0}
                         title="Toggle all details"
                     >
                         {filteredPrompts.length > 0 && filteredPrompts.every(p => expandedIds.has(p.id)) ? 'Collapse All' : 'Expand All'}
@@ -359,10 +563,7 @@ export function PromptLibrary({ onEdit }: { onEdit: (id: string) => void }) {
 
                     <button
                         className="btn btn-secondary"
-                        onClick={() => {
-                            const name = prompt('Folder Name:');
-                            if (name) addFolder(name);
-                        }}
+                        onClick={openCreateFolder}
                     >
                         + New Folder
                     </button>
@@ -370,35 +571,58 @@ export function PromptLibrary({ onEdit }: { onEdit: (id: string) => void }) {
             </div>
 
             <div style={{ display: 'flex', gap: '1rem', alignItems: 'center', flexWrap: 'wrap', background: 'white', padding: '0.75rem 1rem', borderRadius: '8px', border: '1px solid var(--border)', boxShadow: 'var(--shadow-sm)' }}>
-                <div style={{ flex: 1, minWidth: '200px' }}>
+                <div style={{ flex: 1, minWidth: 0 }}>
                     <input
                         value={searchTerm}
                         onChange={e => setSearchTerm(e.target.value)}
-                        placeholder="Search prompts & folders..."
+                        type="search"
+                        aria-label={currentFolderId ? "Search prompts in this folder" : "Search prompts and folders"}
+                        placeholder={currentFolderId ? "Search this folder..." : "Search prompts & folders..."}
                         style={{ width: '100%' }}
                     />
                 </div>
             </div>
 
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '2rem' }}>
+            <div className="library-drag-guidance">
+                <p id="library-drag-instructions">{dragInstructions}</p>
+                {!currentFolderId && searchTerm && (
+                    <div
+                        className={`library-root-drop library-root-drop-search ${activeFolderId === '' ? 'is-drop-target' : ''}`}
+                        data-library-folder=""
+                        onDragOver={event => {
+                            if (!isDraggingPrompt) return;
+                            event.preventDefault();
+                            setDragOverFolderId('');
+                            setDragOverPromptId(null);
+                        }}
+                        onDragLeave={() => setDragOverFolderId(null)}
+                        onDrop={event => handleDropOnFolder(event, undefined)}
+                    >Drop here to move to root</div>
+                )}
+                <p className="library-drag-status" role="status" aria-live="polite" aria-atomic="true">
+                    {pointerDrag.drag ? `Moving ${pointerDrag.drag.label}. ${pointerDropLabel}.` : moveFeedback}
+                </p>
+            </div>
+
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '2rem', minWidth: 0 }}>
 
                 {/* Folders Section */}
-                {(!currentFolderId || searchTerm) && filteredFolders.length > 0 && (
-                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(220px, 1fr))', gap: '1rem' }}>
+                {!currentFolderId && filteredFolders.length > 0 && (
+                    <div className="library-folder-grid">
                         {filteredFolders.map((folder) => {
                             const idx = sortedFolders.findIndex(f => f.id === folder.id);
                             return (
                                 <div
                                     key={folder.id}
-                                    className="card hover-trigger"
-                                    onClick={() => setCurrentFolderId(folder.id)}
+                                    className={`card library-folder-card ${activeFolderId === folder.id ? 'is-drop-target' : ''}`}
+                                    data-library-folder={folder.id}
                                     onDragOver={(e) => {
+                                        if (!isDraggingPrompt) return;
                                         e.preventDefault();
-                                        (e.currentTarget as HTMLElement).style.background = '#e2e8f0';
+                                        setDragOverFolderId(folder.id);
+                                        setDragOverPromptId(null);
                                     }}
-                                    onDragLeave={(e) => {
-                                        (e.currentTarget as HTMLElement).style.background = folder.color ? `${folder.color}15` : '#f8fafc';
-                                    }}
+                                    onDragLeave={() => setDragOverFolderId(null)}
                                     onDrop={(e) => handleDropOnFolder(e, folder.id)}
                                     style={{
                                         padding: '1rem',
@@ -412,20 +636,21 @@ export function PromptLibrary({ onEdit }: { onEdit: (id: string) => void }) {
                                         transition: 'background 0.2s'
                                     }}
                                 >
-                                    <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', fontWeight: 600, overflow: 'hidden' }}>
-                                        <span style={{ fontSize: '1.2rem' }}>{folder.icon || '📁'}</span>
-                                        <span style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{folder.name}</span>
+                                    <button className="library-folder-open" onClick={() => openFolder(folder.id)} aria-label={`Open folder ${folder.name}`} title={folder.name}>
+                                        <span aria-hidden="true" style={{ fontSize: '1.2rem' }}>{folder.icon || '📁'}</span>
+                                        <span className="library-folder-name">{folder.name}</span>
                                         <span className="text-muted" style={{ fontWeight: 400, fontSize: '0.85rem' }}>
                                             ({prompts.filter(p => p.folderId === folder.id).length})
                                         </span>
-                                    </div>
-                                    <div style={{ display: 'flex', gap: '0.25rem', alignItems: 'center' }}>
+                                    </button>
+                                    <div className="library-folder-actions">
                                         {idx > 0 && (
                                             <button
                                                 onClick={(e) => { e.stopPropagation(); moveFolderUp(folder); }}
                                                 className="btn-icon"
                                                 style={{ opacity: 0.5, fontSize: '0.8rem' }}
                                                 title="Move up"
+                                                aria-label={`Move folder ${folder.name} up`}
                                             >↑</button>
                                         )}
                                         {idx < sortedFolders.length - 1 && (
@@ -434,6 +659,7 @@ export function PromptLibrary({ onEdit }: { onEdit: (id: string) => void }) {
                                                 className="btn-icon"
                                                 style={{ opacity: 0.5, fontSize: '0.8rem' }}
                                                 title="Move down"
+                                                aria-label={`Move folder ${folder.name} down`}
                                             >↓</button>
                                         )}
                                         <button
@@ -441,6 +667,7 @@ export function PromptLibrary({ onEdit }: { onEdit: (id: string) => void }) {
                                             className="btn-icon"
                                             style={{ opacity: 0.5 }}
                                             title="Edit folder"
+                                            aria-label={`Edit folder ${folder.name}`}
                                         >✎</button>
                                         <button
                                             onClick={(e) => {
@@ -450,6 +677,7 @@ export function PromptLibrary({ onEdit }: { onEdit: (id: string) => void }) {
                                             className="btn-icon"
                                             style={{ opacity: 0.5 }}
                                             title="Delete folder"
+                                            aria-label={`Delete folder ${folder.name}`}
                                         >🗑️</button>
                                     </div>
                                 </div>
@@ -459,23 +687,21 @@ export function PromptLibrary({ onEdit }: { onEdit: (id: string) => void }) {
                 )}
 
                 {/* Prompts Section */}
-                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(350px, 1fr))', gap: '1rem' }}>
-                    {filteredPrompts.length === 0 && filteredFolders.length === 0 && (
-                        <div style={{ gridColumn: '1 / -1', textAlign: 'center', padding: '3rem', color: 'var(--text-muted)', border: '2px dashed var(--border)', borderRadius: 'var(--radius)' }}>
-                            <p>No matches found in library.</p>
-                        </div>
-                    )}
-                    {filteredPrompts.map(prompt => (
+                <div className="library-prompt-grid">
+                    {filteredPrompts.map((prompt, promptIndex) => (
                         <div
                             key={prompt.id}
-                            className={`card ${isDraggingPrompt ? 'dragging-mode' : ''}`}
+                            className={`card library-prompt-card ${dragging ? 'dragging-mode' : ''} ${pointerDrag.drag?.source === prompt.id ? 'is-drag-source' : ''} ${activePromptId === prompt.id && activeDropSide ? `library-drop-${activeDropAxis}-${activeDropSide}` : ''}`}
+                            data-library-prompt={prompt.id}
                             draggable
                             onDragStart={(e) => handlePromptDragStart(e, prompt.id)}
                             onDragOver={(e) => handlePromptDragOver(e, prompt.id)}
-                            onDragEnd={() => {
-                                setIsDraggingPrompt(false);
-                                setDragOverPromptId(null);
-                                setDropSide(null);
+                            onDragEnd={resetNativeDrag}
+                            onDragLeave={event => {
+                                if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
+                                    setDragOverPromptId(null);
+                                    setDropSide(null);
+                                }
                             }}
                             onDrop={(e) => handlePromptDrop(e, prompt.id)}
                             style={{
@@ -485,26 +711,11 @@ export function PromptLibrary({ onEdit }: { onEdit: (id: string) => void }) {
                                 gap: '0.75rem',
                                 cursor: 'grab',
                                 position: 'relative',
-                                transition: 'all 0.2s',
-                                border: (dragOverPromptId === prompt.id && dropSide) ? '2px solid var(--primary)' : undefined,
-                                filter: isDraggingPrompt && dragOverPromptId !== prompt.id ? 'opacity(0.8)' : undefined,
-                                transform: dragOverPromptId === prompt.id ? (dropSide === 'before' ? 'translateX(5px)' : 'translateX(-5px)') : undefined
+                                transition: 'box-shadow 0.2s'
                             }}
                         >
                             {/* Drag Indicator Overlay */}
-                            {dragOverPromptId === prompt.id && dropSide && (
-                                <div style={{
-                                    position: 'absolute',
-                                    [dropSide === 'before' ? 'left' : 'right']: '-4px',
-                                    top: '0',
-                                    bottom: '0',
-                                    width: '4px',
-                                    background: 'var(--primary)',
-                                    borderRadius: '2px',
-                                    boxShadow: '0 0 8px var(--primary)',
-                                    zIndex: 10
-                                }} />
-                            )}
+                            {activePromptId === prompt.id && activeDropSide && <span className="library-drop-indicator" aria-hidden="true" />}
                             <div style={{ display: 'flex', gap: '0.75rem', alignItems: 'flex-start' }}>
                                 {/* Rating indicator */}
                                 <div style={{
@@ -526,17 +737,34 @@ export function PromptLibrary({ onEdit }: { onEdit: (id: string) => void }) {
 
                                 <div style={{ flex: 1, minWidth: 0 }}>
                                     {/* Top Row: Title and Actions */}
-                                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: '1rem' }}>
-                                        <h3 style={{ fontSize: '0.95rem', fontWeight: 600, margin: 0, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }} title={prompt.title}>
+                                    <div className="library-prompt-heading">
+                                        <h3 className="library-prompt-title" title={prompt.title}>
                                             {prompt.title}
                                         </h3>
 
-                                        <div style={{ display: 'flex', gap: '0.25rem', alignItems: 'center', flexShrink: 0 }}>
-                                            <button onClick={() => onEdit(prompt.id)} className="btn-icon" title="Edit">✎</button>
+                                        <div className="library-prompt-actions">
+                                            <button
+                                                type="button"
+                                                className="btn-icon library-drag-handle"
+                                                draggable={false}
+                                                data-library-drag-handle=""
+                                                aria-label={`Drag prompt ${prompt.title}`}
+                                                aria-describedby="library-drag-instructions"
+                                                title="Drag to reorder or move to a folder"
+                                                {...pointerDrag.getHandleProps(prompt.id)}
+                                            >
+                                                <svg width="20" height="20" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+                                                    <circle cx="7" cy="4" r="1.5" /><circle cx="13" cy="4" r="1.5" />
+                                                    <circle cx="7" cy="10" r="1.5" /><circle cx="13" cy="10" r="1.5" />
+                                                    <circle cx="7" cy="16" r="1.5" /><circle cx="13" cy="16" r="1.5" />
+                                                </svg>
+                                            </button>
+                                            <button onClick={() => onEdit(prompt.id)} className="btn-icon" title="Edit" aria-label={`Edit prompt ${prompt.title}`}>✎</button>
                                             <button
                                                 onClick={() => copyToClipboard(getFullContent(prompt.segments), prompt.id)}
                                                 className="btn-icon"
                                                 title="Copy"
+                                                aria-label={`Copy prompt ${prompt.title}`}
                                                 style={{ color: copiedId === prompt.id ? 'var(--success)' : undefined }}
                                             >
                                                 {copiedId === prompt.id ? '✓' : '📋'}
@@ -547,6 +775,7 @@ export function PromptLibrary({ onEdit }: { onEdit: (id: string) => void }) {
                                                 }}
                                                 className="btn-icon"
                                                 title="Delete"
+                                                aria-label={`Delete prompt ${prompt.title}`}
                                                 style={{ color: 'var(--danger)' }}
                                             >
                                                 🗑️
@@ -555,12 +784,13 @@ export function PromptLibrary({ onEdit }: { onEdit: (id: string) => void }) {
                                     </div>
 
                                     {/* Bottom Row: Stats and Folder Selection */}
-                                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: '6px' }}>
+                                    <div className="library-prompt-meta">
                                         <div className="text-muted" style={{ fontSize: '0.75rem', fontWeight: 500 }}>
                                             {getCompositionSummary(prompt.segments)}
                                         </div>
 
                                         <select
+                                            aria-label={`Move prompt ${prompt.title} to folder`}
                                             value={prompt.folderId || ''}
                                             onChange={(e) => movePrompt(prompt, e.target.value || undefined)}
                                             onClick={(e) => e.stopPropagation()}
@@ -583,6 +813,15 @@ export function PromptLibrary({ onEdit }: { onEdit: (id: string) => void }) {
                                 </div>
                             </div>
 
+                            <p className="library-copy-status" role="status" aria-live="polite">{feedbackPromptId === prompt.id ? copyFeedback : ''}</p>
+
+                            {sortBy === 'custom' && filteredPrompts.length > 1 && (
+                                <div className="library-prompt-order" aria-label={`Order for ${prompt.title}`}>
+                                    <button className="btn btn-secondary" disabled={promptIndex === 0} onClick={() => movePromptBy(prompt.id, -1)} aria-label={`Move prompt ${prompt.title} up`}>↑ Move up</button>
+                                    <button className="btn btn-secondary" disabled={promptIndex === filteredPrompts.length - 1} onClick={() => movePromptBy(prompt.id, 1)} aria-label={`Move prompt ${prompt.title} down`}>↓ Move down</button>
+                                </div>
+                            )}
+
                             <details
                                 style={{ marginTop: 'auto' }}
                                 open={expandedIds.has(prompt.id)}
@@ -596,10 +835,10 @@ export function PromptLibrary({ onEdit }: { onEdit: (id: string) => void }) {
                                     });
                                 }}
                             >
-                                <summary style={{ fontSize: '0.75rem', color: 'var(--text-muted)', cursor: 'pointer', listStyle: 'none' }}>
+                                <summary className="library-details-toggle">
                                     {expandedIds.has(prompt.id) ? '▲ Hide Details' : '▼ Show Details'}
                                 </summary>
-                                <div style={{ marginTop: '0.5rem', paddingLeft: '0.5rem', borderLeft: '2px solid var(--border)' }}>
+                                <div className="library-prompt-details" style={{ marginTop: '0.5rem', paddingLeft: '0.5rem', borderLeft: '2px solid var(--border)' }}>
                                     {prompt.notes && (
                                         <div style={{ marginBottom: '0.5rem', fontSize: '0.8rem', color: 'var(--text-secondary)' }}>
                                             <strong>Notes:</strong> {prompt.notes}
@@ -625,7 +864,7 @@ export function PromptLibrary({ onEdit }: { onEdit: (id: string) => void }) {
                 </div>
 
                 {/* Empty State */}
-                {filteredPrompts.length === 0 && (!currentFolderId ? folders.length === 0 : true) && (
+                {filteredPrompts.length === 0 && (searchTerm ? filteredFolders.length === 0 : (currentFolderId || folders.length === 0)) && (
                     <div style={{
                         textAlign: 'center',
                         padding: '3rem',
@@ -635,9 +874,9 @@ export function PromptLibrary({ onEdit }: { onEdit: (id: string) => void }) {
                         background: 'var(--bg-app)'
                     }}>
                         <p className="text-lg mb-2">
-                            {currentFolderId ? 'No prompts in this folder.' : 'No saved prompts or folders.'}
+                            {searchTerm ? 'No matches found in library.' : currentFolderId ? 'No prompts in this folder.' : 'No saved prompts or folders.'}
                         </p>
-                        {!currentFolderId && <p className="text-sm">Create a folder or go to "Builder" to start.</p>}
+                        {!searchTerm && !currentFolderId && <p className="text-sm">Create a folder or go to "Builder" to start.</p>}
                     </div>
                 )}
             </div>
