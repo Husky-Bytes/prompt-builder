@@ -7,12 +7,14 @@ import { useStore } from './store';
 function App() {
   const [activeTab, setActiveTab] = useState<'blocks' | 'builder' | 'library'>('builder');
   const [dataMessage, setDataMessage] = useState('');
+  const [viewRevision, setViewRevision] = useState(0);
   const importInput = useRef<HTMLInputElement>(null);
   const { setEditPromptId, setBuilderState, prompts, exportData, importData, clearAllData, storageError } = useStore();
 
   const handleClearAll = () => {
-    if (confirm('Clear ALL blocks, prompts, folders and your draft? Export a backup first if you want to keep them.')) {
+    if (confirm('Clear ALL blocks, prompts, folders and your draft? To keep your draft, save it to Library first, then export a backup.')) {
       clearAllData();
+      setViewRevision(revision => revision + 1);
       setDataMessage('All data cleared.');
     }
   };
@@ -34,10 +36,11 @@ function App() {
   const handleImport = (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     event.target.value = '';
-    if (!file || !confirm('Replace your current data and draft with this backup? Export your current data first if you want to keep it.')) return;
+    if (!file || !confirm('Replace your current data and clear your draft? To keep your draft, save it to Library first, then export your current data.')) return;
     const reader = new FileReader();
     reader.onload = () => {
       if (typeof reader.result === 'string' && importData(reader.result)) {
+        setViewRevision(revision => revision + 1);
         setDataMessage('Backup imported successfully.');
       } else {
         setDataMessage('Could not import this backup. Check the JSON file and try again.');
@@ -66,6 +69,7 @@ function App() {
         </div>
         <details className="backup-menu">
           <summary>Data &amp; backup</summary>
+          <p className="backup-hint">Backups contain saved blocks, prompts and folders. Save your draft to Library first.</p>
           <div className="backup-actions">
             <button onClick={handleExport} className="btn btn-secondary">Export</button>
             <button onClick={() => importInput.current?.click()} className="btn btn-secondary">Import</button>
@@ -85,7 +89,7 @@ function App() {
           </button>
         ))}
       </nav>
-      <main id="main-content" className="app-content" tabIndex={-1}>
+      <main key={viewRevision} id="main-content" className="app-content" tabIndex={-1}>
         {activeTab === 'blocks' && <BlockManager />}
         {activeTab === 'builder' && <PromptBuilder />}
         {activeTab === 'library' && <PromptLibrary onEdit={handleEdit} />}

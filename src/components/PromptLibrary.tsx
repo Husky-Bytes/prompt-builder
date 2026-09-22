@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { useStore } from '../store';
 import { PRESET_COLORS, PRESET_ICONS } from '../types';
@@ -21,6 +21,7 @@ export function PromptLibrary({ onEdit }: { onEdit: (id: string) => void }) {
 
     // Folder edit modal state
     const [editingFolder, setEditingFolder] = useState<Folder | null>(null);
+    const [creatingFolder, setCreatingFolder] = useState(false);
     const [editFolderName, setEditFolderName] = useState('');
     const [editFolderIcon, setEditFolderIcon] = useState('📁');
     const [editFolderColor, setEditFolderColor] = useState<string | undefined>(undefined);
@@ -30,8 +31,12 @@ export function PromptLibrary({ onEdit }: { onEdit: (id: string) => void }) {
     const [copyFeedback, setCopyFeedback] = useState('');
     const [feedbackPromptId, setFeedbackPromptId] = useState<string | null>(null);
     const copyTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-    const folderDialog = useRef<HTMLDivElement>(null);
-    const isFolderDialogOpen = editingFolder !== null;
+    const folderDialog = useRef<HTMLFormElement>(null);
+    const isFolderDialogOpen = creatingFolder || editingFolder !== null;
+    const closeFolderDialog = useCallback(() => {
+        setEditingFolder(null);
+        setCreatingFolder(false);
+    }, []);
 
     useEffect(() => () => {
         if (copyTimer.current) clearTimeout(copyTimer.current);
@@ -47,7 +52,7 @@ export function PromptLibrary({ onEdit }: { onEdit: (id: string) => void }) {
         const handleKeyDown = (event: KeyboardEvent) => {
             if (event.key === 'Escape') {
                 event.preventDefault();
-                setEditingFolder(null);
+                closeFolderDialog();
                 return;
             }
             if (event.key !== 'Tab') return;
@@ -69,7 +74,7 @@ export function PromptLibrary({ onEdit }: { onEdit: (id: string) => void }) {
             document.removeEventListener('keydown', handleKeyDown);
             if (previousFocus?.isConnected) previousFocus.focus();
         };
-    }, [isFolderDialogOpen]);
+    }, [isFolderDialogOpen, closeFolderDialog]);
 
 
 
@@ -224,22 +229,33 @@ export function PromptLibrary({ onEdit }: { onEdit: (id: string) => void }) {
         reorderPrompts(ordered.map((prompt, position) => ({ ...prompt, position })));
     };
 
+    const openCreateFolder = () => {
+        setEditingFolder(null);
+        setCreatingFolder(true);
+        setEditFolderName('');
+        setEditFolderIcon('📁');
+        setEditFolderColor(undefined);
+    };
+
     const openEditFolder = (folder: Folder) => {
+        setCreatingFolder(false);
         setEditingFolder(folder);
         setEditFolderName(folder.name);
         setEditFolderIcon(folder.icon || '📁');
         setEditFolderColor(folder.color);
     };
 
-    const saveEditFolder = () => {
-        if (editingFolder && editFolderName.trim()) {
-            updateFolder(editingFolder.id, {
-                name: editFolderName.trim(),
-                icon: editFolderIcon,
-                color: editFolderColor
-            });
-            setEditingFolder(null);
+    const saveFolder = () => {
+        const name = editFolderName.trim();
+        if (!name) return;
+        if (creatingFolder) {
+            addFolder(name, editFolderIcon, editFolderColor);
+            setCurrentFolderId(null);
+            setSearchTerm('');
+        } else if (editingFolder) {
+            updateFolder(editingFolder.id, { name, icon: editFolderIcon, color: editFolderColor });
         }
+        closeFolderDialog();
     };
 
     const moveFolderUp = (folder: Folder) => {
@@ -263,13 +279,12 @@ export function PromptLibrary({ onEdit }: { onEdit: (id: string) => void }) {
     const toggleAllDetails = () => {
         // If all currently filtered prompts are open, close them. Otherwise open them.
         const allVisibleIds = filteredPrompts.map(p => p.id);
-        const allOpen = allVisibleIds.every(id => expandedIds.has(id));
-
-        if (allOpen) {
-            setExpandedIds(new Set());
-        } else {
-            setExpandedIds(new Set(allVisibleIds));
-        }
+        setExpandedIds(previous => {
+            const allOpen = allVisibleIds.every(id => previous.has(id));
+            const next = new Set(previous);
+            allVisibleIds.forEach(id => allOpen ? next.delete(id) : next.add(id));
+            return next;
+        });
     };
 
     const handleApplySortToCustom = () => {
@@ -292,10 +307,11 @@ export function PromptLibrary({ onEdit }: { onEdit: (id: string) => void }) {
 
     return (
         <div className="prompt-library">
-            {/* Edit Folder Modal */}
-            {editingFolder && createPortal(
-                <div className="library-modal-backdrop" onClick={() => setEditingFolder(null)}>
-                    <div
+            {/* Create/Edit Folder Modal */}
+            {isFolderDialogOpen && createPortal(
+                <div className="library-modal-backdrop" onClick={closeFolderDialog}>
+                    <form
+                        onSubmit={event => { event.preventDefault(); saveFolder(); }}
                         ref={folderDialog}
                         className="card library-folder-dialog"
                         role="dialog"
@@ -304,8 +320,8 @@ export function PromptLibrary({ onEdit }: { onEdit: (id: string) => void }) {
                         onClick={e => e.stopPropagation()}
                     >
                         <div className="library-dialog-heading">
-                            <h3 id="library-folder-dialog-title">Edit Folder</h3>
-                            <button className="btn-icon" aria-label="Close folder editor" onClick={() => setEditingFolder(null)}>×</button>
+                            <h3 id="library-folder-dialog-title">{creatingFolder ? 'New Folder' : 'Edit Folder'}</h3>
+                            <button type="button" className="btn-icon" aria-label="Close folder editor" onClick={closeFolderDialog}>×</button>
                         </div>
 
                         <div style={{ marginBottom: '1rem' }}>
@@ -324,6 +340,7 @@ export function PromptLibrary({ onEdit }: { onEdit: (id: string) => void }) {
                                 {PRESET_ICONS.map(icon => (
                                     <button
                                         key={icon}
+                                        type="button"
                                         onClick={() => setEditFolderIcon(icon)}
                                         aria-label={`Use ${icon} icon`}
                                         aria-pressed={editFolderIcon === icon}
@@ -347,6 +364,7 @@ export function PromptLibrary({ onEdit }: { onEdit: (id: string) => void }) {
                             <label style={{ display: 'block', marginBottom: '0.25rem', fontSize: '0.85rem' }}>Color</label>
                             <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.5rem' }}>
                                 <button
+                                    type="button"
                                     onClick={() => setEditFolderColor(undefined)}
                                     style={{
                                         width: '28px',
@@ -363,6 +381,7 @@ export function PromptLibrary({ onEdit }: { onEdit: (id: string) => void }) {
                                 {PRESET_COLORS.map(color => (
                                     <button
                                         key={color}
+                                        type="button"
                                         onClick={() => setEditFolderColor(color)}
                                         aria-label={`Use folder color ${color}`}
                                         aria-pressed={editFolderColor === color}
@@ -380,10 +399,10 @@ export function PromptLibrary({ onEdit }: { onEdit: (id: string) => void }) {
                         </div>
 
                         <div style={{ display: 'flex', gap: '0.5rem', justifyContent: 'flex-end' }}>
-                            <button className="btn btn-secondary" onClick={() => setEditingFolder(null)}>Cancel</button>
-                            <button className="btn btn-primary" onClick={saveEditFolder} disabled={!editFolderName.trim()}>Save</button>
+                            <button type="button" className="btn btn-secondary" onClick={closeFolderDialog}>Cancel</button>
+                            <button type="submit" className="btn btn-primary" disabled={!editFolderName.trim()}>{creatingFolder ? 'Create Folder' : 'Save'}</button>
                         </div>
-                    </div>
+                    </form>
                 </div>,
                 document.body
             )}
@@ -437,10 +456,7 @@ export function PromptLibrary({ onEdit }: { onEdit: (id: string) => void }) {
 
                     <button
                         className="btn btn-secondary"
-                        onClick={() => {
-                            const name = prompt('Folder Name:');
-                            if (name) addFolder(name);
-                        }}
+                        onClick={openCreateFolder}
                     >
                         + New Folder
                     </button>
