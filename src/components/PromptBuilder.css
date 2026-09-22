@@ -58,6 +58,8 @@
 .builder-actions, .builder-preview-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem; }
 .builder-segments { padding: 1rem; display: flex; flex-wrap: wrap; align-content: flex-start; align-items: flex-start; gap: 0.75rem; min-height: 120px; }
 .builder-segments.is-dragging { background: #f0f9ff; }
+.builder-segments.is-valid-drop { outline: 2px solid var(--primary); outline-offset: 2px; }
+.builder-segments.is-dragging:hover { transform: none; }
 .builder-segment {
     position: relative;
     display: flex;
@@ -84,7 +86,6 @@
 .builder-block-chip { display: block; padding: 6px 10px; background: #e0e7ff; color: #4338ca; border: 1px solid #c7d2fe; border-radius: 16px; font-size: 0.9rem; font-weight: 500; overflow-wrap: anywhere; user-select: none; }
 .builder-newline { padding: 0 0.5rem; font-size: 0.7rem; font-weight: 700; color: var(--text-muted); }
 .builder-text-editor { display: flex; align-items: center; min-width: 0; }
-.builder-drag-handle { cursor: grab; color: var(--text-muted); padding: 0.25rem; user-select: none; }
 .builder-text-sizer { flex: 1; display: grid; align-items: stretch; min-width: 0; }
 .builder-text-mirror, .builder-text-sizer textarea {
     grid-area: 1 / 1;
@@ -132,7 +133,6 @@
     .builder-segment-text .builder-segment-controls { margin-left: auto; }
     .builder-text-mirror, .builder-text-sizer textarea { font-size: 16px; }
     .builder-text-sizer textarea { min-height: 64px; }
-    .builder-drag-handle { display: none; }
     .builder-segment.is-drop-before { box-shadow: 0 -3px 0 var(--primary); }
     .builder-segment.is-drop-after { box-shadow: 0 3px 0 var(--primary); }
     .builder-preview-tools { flex: 1 0 100%; justify-content: space-between; }

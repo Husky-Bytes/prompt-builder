@@ -1,9 +1,13 @@
-import { useMemo, useState } from 'react';
+import { useMemo, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import type { DragEvent, SyntheticEvent } from 'react';
 import { useStore } from '../store';
 import { PRESET_COLORS } from '../types';
 import type { Block, PromptSegment } from '../types';
 import { copyText } from '../utils/clipboard';
+import { usePointerDrag } from '../hooks/usePointerDrag';
+import { applyBuilderDrop } from '../utils/builderDrag';
+import type { BuilderDragSource } from '../utils/builderDrag';
 import './PromptBuilder.css';
 
 const COLOR_NAMES = ['Indigo', 'Violet', 'Pink', 'Red', 'Orange', 'Yellow', 'Green', 'Teal', 'Sky', 'Slate'];
@@ -33,6 +37,45 @@ export function PromptBuilder() {
     const [dragOverIndex, setDragOverIndex] = useState<number | null>(null);
     const [isDragging, setIsDragging] = useState(false);
     const [dragSourceIndex, setDragSourceIndex] = useState<number | null>(null);
+    const segmentsElement = useRef<HTMLDivElement>(null);
+
+    const dropIntoBuilder = (source: BuilderDragSource, gap: number) => {
+        if (source.kind === 'block' && !blocks.some(block => block.id === source.id)) return;
+        const next = applyBuilderDrop(segments, source, gap);
+        if (next === segments) return;
+        updateState({ segments: next });
+        setSelection(null);
+        setStatus(source.kind === 'block' ? 'Block added at the drop position.' : 'Prompt order updated.');
+    };
+
+    const pointerDrag = usePointerDrag<BuilderDragSource, number>({
+        getLabel: source => source.kind === 'block' ? blocks.find(block => block.id === source.id)?.name || 'Block' : `Item ${source.index + 1}`,
+        getTarget: (x, y) => {
+            const zone = segmentsElement.current;
+            const hit = document.elementFromPoint(x, y);
+            if (!zone || !hit || !zone.contains(hit)) return null;
+            const items = Array.from(zone.querySelectorAll<HTMLElement>('[data-builder-index]'));
+            if (!items.length) return 0;
+            // Nearest card also handles the gaps between wrapped rows of segments.
+            const nearest = items.reduce((best, item) => {
+                const rect = item.getBoundingClientRect();
+                const dx = Math.max(rect.left - x, 0, x - rect.right);
+                const dy = Math.max(rect.top - y, 0, y - rect.bottom);
+                const distance = dx * dx + dy * dy;
+                return distance < best.distance ? { item, distance } : best;
+            }, { item: items[0], distance: Infinity }).item;
+            const rect = nearest.getBoundingClientRect();
+            const index = Number(nearest.dataset.builderIndex);
+            const vertical = window.matchMedia('(max-width: 800px)').matches || rect.width > zone.clientWidth * 0.8;
+            const before = y < rect.top || (y <= rect.bottom && (vertical ? y < rect.top + rect.height / 2 : x < rect.left + rect.width / 2));
+            return before ? index : index + 1;
+        },
+        onDrop: dropIntoBuilder,
+    });
+    const activeDrag = pointerDrag.drag;
+    const activeDropIndex = activeDrag ? activeDrag.target : dragOverIndex;
+    const activeSourceIndex = activeDrag ? (activeDrag.source.kind === 'segment' ? activeDrag.source.index : null) : dragSourceIndex;
+    const dragging = !!activeDrag || isDragging;
 
     const blockUsageCounts = useMemo(() => {
         const counts: Record<string, number> = {};
@@ -226,20 +269,12 @@ export function PromptBuilder() {
     const handleDrop = (event: DragEvent, dropIndex: number) => {
         event.preventDefault();
         const source = event.dataTransfer.getData('source');
-        const updated = [...segments];
         if (source === 'sidebar') {
             const blockId = event.dataTransfer.getData('blockId');
-            if (blocks.some(block => block.id === blockId)) {
-                updated.splice(dropIndex, 0, { type: 'block', blockId });
-                updateState({ segments: updated });
-            }
+            dropIntoBuilder({ kind: 'block', id: blockId }, dropIndex);
         } else if (source === 'segment') {
             const fromIndex = Number.parseInt(event.dataTransfer.getData('segmentIndex'), 10);
-            if (Number.isInteger(fromIndex) && fromIndex >= 0 && fromIndex < updated.length && fromIndex !== dropIndex) {
-                const [moved] = updated.splice(fromIndex, 1);
-                updated.splice(fromIndex < dropIndex ? dropIndex - 1 : dropIndex, 0, moved);
-                updateState({ segments: updated });
-            }
+            dropIntoBuilder({ kind: 'segment', index: fromIndex }, dropIndex);
         }
         setSelection(null);
         resetDrag();
@@ -255,6 +290,9 @@ export function PromptBuilder() {
 
     return (
         <div className="prompt-builder" onDragEnd={resetDrag}>
+            {activeDrag && createPortal(<div className="pointer-drag-preview" aria-hidden="true" style={{ left: activeDrag.x, top: activeDrag.y }}>
+                <strong>{activeDrag.label}</strong><span>{activeDrag.target === null ? 'Drag into the prompt editor' : 'Release to place here'}</span>
+            </div>, document.body)}
             <aside className="builder-sidebar" aria-label="Available blocks">
                 <h2 className="builder-sidebar-title">Available Blocks</h2>
                 <button className="builder-blocks-toggle btn btn-secondary" aria-expanded={blocksExpanded} aria-controls="builder-available-blocks" onClick={() => setBlocksExpanded(!blocksExpanded)}>
@@ -274,7 +312,7 @@ export function PromptBuilder() {
                             <button key={color} className="builder-color" aria-label={`Filter ${COLOR_NAMES[index]} blocks`} title={COLOR_NAMES[index]} aria-pressed={filterColor === color} onClick={() => setFilterColor(filterColor === color ? null : color)}><span className="builder-color-swatch" style={{ backgroundColor: color }} /></button>
                         ))}
                     </div>
-                    <p className="builder-hint">Tap a block to add it. Use ↑ ↓ in the editor to change its order.</p>
+                    <p className="builder-hint">Tap a block to add it, or hold its ⠿ handle and drag it into the editor.</p>
                     <div className="builder-block-list">
                         {filteredBlocks.map(block => editingBlockId === block.id ? (
                             <div key={block.id} className="card builder-edit-block">
@@ -293,6 +331,7 @@ export function PromptBuilder() {
                             </div>
                         ) : (
                             <div key={block.id} className="card builder-block-card" draggable onDragStart={event => handleBlockDragStart(event, block.id)} style={{ borderLeftColor: block.color || 'var(--primary)', background: block.color ? `${block.color}08` : undefined }}>
+                                <button type="button" className="btn-icon pointer-drag-handle" aria-label={`Drag ${block.name} into prompt`} title="Hold and drag into prompt" draggable={false} {...pointerDrag.getHandleProps({ kind: 'block', id: block.id })}>⠿</button>
                                 <button className="builder-add-block" onClick={() => addBlockSegment(block.id)} aria-label={`Add ${block.name} to prompt`}>
                                     <span className="builder-block-heading"><span>{block.name}</span>{blockUsageCounts[block.id] ? <span className="builder-count" aria-label={`Used ${blockUsageCounts[block.id]} times`}>{blockUsageCounts[block.id]}</span> : null}</span>
                                     <span className="builder-block-excerpt" title={block.content}>{block.content}</span>
@@ -318,10 +357,11 @@ export function PromptBuilder() {
                     </div>
                 </div>
                 <p className="builder-status" role="status" aria-live="polite">{status}</p>
-                <div className={`card builder-segments ${isDragging ? 'is-dragging' : ''}`} onDragOver={event => { event.preventDefault(); setDragOverIndex(segments.length); }} onDrop={event => handleDrop(event, segments.length)}>
+                {segments.length > 0 && <p className="builder-hint" id="builder-drag-help">Hold ⠿ and drag to reorder. You can also use ↑ ↓.</p>}
+                <div ref={segmentsElement} className={`card builder-segments ${dragging ? 'is-dragging' : ''} ${activeDrag?.target !== null && activeDrag ? 'is-valid-drop' : ''}`} onDragOver={event => { event.preventDefault(); setDragOverIndex(segments.length); }} onDrop={event => handleDrop(event, segments.length)}>
                     {segments.length === 0 && <p className="builder-hint">Tap “+ Text” to start, or open Available Blocks and tap a block to add it.</p>}
                     {segments.map((segment, index) => (
-                        <div key={index} className={`builder-segment builder-segment-${segment.type} ${dragSourceIndex === index ? 'is-drag-source' : ''} ${isDragging && dragOverIndex === index ? 'is-drop-before' : ''} ${isDragging && dragOverIndex === index + 1 ? 'is-drop-after' : ''}`}
+                        <div key={index} data-builder-index={index} className={`builder-segment builder-segment-${segment.type} ${activeSourceIndex === index ? 'is-drag-source' : ''} ${dragging && activeDropIndex === index ? 'is-drop-before' : ''} ${dragging && activeDropIndex === index + 1 ? 'is-drop-after' : ''}`}
                             draggable={segment.type !== 'text'} onDragStart={event => { if (segment.type !== 'text') handleSegmentDragStart(event, index); }}
                             onDragOver={event => { event.preventDefault(); event.stopPropagation(); setDragOverIndex(getDropPosition(event, index)); }}
                             onDrop={event => { event.preventDefault(); event.stopPropagation(); handleDrop(event, getDropPosition(event, index)); }}>
@@ -331,7 +371,6 @@ export function PromptBuilder() {
                                     return <span className="builder-block-chip" title={block?.content} style={{ background: block?.color ? `${block.color}20` : undefined, color: block?.color, borderColor: block?.color ? `${block.color}40` : undefined }}>{block?.name || 'Unknown block'}</span>;
                                 })() : segment.type === 'newline' ? <span className="builder-newline">↵ LINE BREAK</span> : (
                                     <div className="builder-text-editor">
-                                        <span className="builder-drag-handle" draggable onDragStart={event => { event.stopPropagation(); handleSegmentDragStart(event, index); }} title="Drag to reorder" aria-hidden="true">⋮⋮</span>
                                         <div className="builder-text-sizer">
                                             <span className="builder-text-mirror" aria-hidden="true">{segment.content + ' '}</span>
                                             <textarea aria-label={`Prompt text ${index + 1}`} value={segment.content} placeholder="Write prompt text..." rows={1} onChange={event => updateTextSegment(index, event.target.value)} onSelect={event => handleTextSelect(index, event)} onPointerUp={event => handleTextSelect(index, event)} onKeyUp={event => handleTextSelect(index, event)} autoFocus={!segment.content} />
@@ -340,6 +379,7 @@ export function PromptBuilder() {
                                 )}
                             </div>
                             <div className="builder-segment-controls" role="group" aria-label={`Item ${index + 1} controls`}>
+                                <button type="button" className="btn-icon pointer-drag-handle" aria-label={`Drag item ${index + 1} to reorder`} aria-describedby="builder-drag-help" draggable={false} {...pointerDrag.getHandleProps({ kind: 'segment', index })}>⠿</button>
                                 <button className="btn-icon" onClick={() => moveSegment(index, -1)} disabled={index === 0} aria-label={`Move item ${index + 1} up`} title="Move earlier">↑</button>
                                 <button className="btn-icon" onClick={() => moveSegment(index, 1)} disabled={index === segments.length - 1} aria-label={`Move item ${index + 1} down`} title="Move later">↓</button>
                                 <button className="btn-icon builder-remove-segment" onClick={() => removeSegment(index)} aria-label={`Remove item ${index + 1}`} title="Remove item">×</button>

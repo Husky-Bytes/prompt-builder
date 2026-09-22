@@ -89,6 +89,38 @@ textarea { resize: vertical; }
 [hidden] { display: none !important; }
 html { scroll-padding-top: 5rem; }
 
+/* Only handles claim the gesture; content remains scrollable/selectable on phones. */
+button.pointer-drag-handle {
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
+  cursor: grab;
+  min-width: 44px;
+  min-height: 44px;
+  flex-shrink: 0;
+  font-size: 1.3rem;
+  color: var(--text-secondary);
+}
+button.pointer-drag-handle:active { cursor: grabbing; background: var(--primary-light); }
+.pointer-drag-preview {
+  position: fixed;
+  z-index: 2000;
+  pointer-events: none;
+  transform: translate(-50%, calc(-100% - 24px));
+  width: max-content;
+  max-width: min(240px, calc(100vw - 24px));
+  padding: 0.65rem 0.85rem;
+  border: 2px solid var(--primary);
+  border-radius: 10px;
+  background: white;
+  box-shadow: var(--shadow-lg);
+  overflow-wrap: anywhere;
+  color: var(--text-main);
+}
+.pointer-drag-preview strong, .pointer-drag-preview span { display: block; font-size: 0.85rem; }
+.pointer-drag-preview span { color: var(--text-secondary); font-size: 0.75rem; margin-top: 0.2rem; }
+
 /* Typography */
 h1,
 h2,
